@@ -1,0 +1,13 @@
+groq
+openai
+python-dotenv
+fastapi
+uvicorn[standard]
+requests
+httpx
+sqlalchemy
+cryptography
+pydantic
+anthropic
+aiohttp
+praw

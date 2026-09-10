@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.venv-rebuild/
+
+# Database
+*.db
+*.sqlite
+
+# Node
+node_modules/
+package-lock.json
+
+# Environment
+.env
+.env.*
+
+# Generated artifacts
+generated_projects/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store

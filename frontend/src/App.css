@@ -1,0 +1,4 @@
+/* App.css — component overrides */
+.schematic-node rect {
+  cursor: pointer;
+}
