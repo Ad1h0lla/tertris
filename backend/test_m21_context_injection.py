@@ -1,13 +1,16 @@
 """
-Tetris M2.1 — Phase 2 Context Injection Verification
+Tetris M2.1 -- Phase 2 Context Injection Verification
 =====================================================
 
 Proves that Phase 2 (competitor_intel) receives Phase 1 output
 through the entire chain:
 
-    main.py DB retrieval → route_to_specialist → run_competitor_intel → LLM prompt
+    main.py DB retrieval -> route_to_specialist -> run_competitor_intel -> LLM prompt
 
-All tests use mocked LLM boundaries — no real API calls.
+All tests use mocked LLM and HTTP boundaries -- no real API calls.
+
+Updated for M2.2: mocks now target the Serper HTTP layer since
+competitor_intel_agent imports search_web from agents.search_agent.
 """
 
 from __future__ import annotations
@@ -38,14 +41,29 @@ PHASE_1_CONTEXT = (
 )
 
 
+def _fake_serper_response(n=1):
+    """Build a minimal Serper response for mocking."""
+    return {
+        "organic": [
+            {"title": f"Result {i}", "link": f"https://example.com/{i}", "snippet": f"Snippet {i}"}
+            for i in range(1, n + 1)
+        ]
+    }
+
+
 class TestPhase2ContextInjection(unittest.TestCase):
     """Verifies that Phase 2 receives and uses Phase 1 context."""
 
-    @patch("agents.specialist.competitor_intel_agent.search_web", return_value=[])
-    @patch("agents.specialist.competitor_intel_agent.format_search_results", return_value="No results.")
+    @patch("agents.search_agent.requests.post")
     @patch("llm.router.get_llm_response")
-    def test_context_reaches_llm_prompt(self, mock_llm, mock_fmt, mock_search):
+    def test_context_reaches_llm_prompt(self, mock_llm, mock_serper):
         """The LLM user_message must contain the Phase 1 output text."""
+        # Mock Serper HTTP
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = _fake_serper_response(1)
+        mock_serper.return_value = mock_resp
+
         mock_llm.return_value = json.dumps({
             "competitors": [{"name": "Habitica", "pricing": "Free/Premium", "target_customer": "Gamers", "weakness": "Complex", "source": "Analysis"}],
             "market_gap": "Student-focused simplicity",
@@ -74,7 +92,6 @@ class TestPhase2ContextInjection(unittest.TestCase):
         call_kwargs = mock_llm.call_args
         user_message = call_kwargs.kwargs.get("user_message") or call_kwargs[1].get("user_message", "")
         if not user_message:
-            # Positional args: task, system_prompt, user_message
             user_message = call_kwargs[0][2] if len(call_kwargs[0]) > 2 else ""
 
         self.assertIn("Phase 1", user_message, "Phase 1 header must appear in user_message")
@@ -87,11 +104,15 @@ class TestPhase2ContextInjection(unittest.TestCase):
         print(f"[PASS] Context injection verified: user_message contains Phase 1 output")
         print(f"  user_message length: {len(user_message)} chars")
 
-    @patch("agents.specialist.competitor_intel_agent.search_web", return_value=[])
-    @patch("agents.specialist.competitor_intel_agent.format_search_results", return_value="No results.")
+    @patch("agents.search_agent.requests.post")
     @patch("llm.router.get_llm_response")
-    def test_empty_context_no_crash(self, mock_llm, mock_fmt, mock_search):
+    def test_empty_context_no_crash(self, mock_llm, mock_serper):
         """Phase 2 must work when context is empty (backward compat)."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = _fake_serper_response(1)
+        mock_serper.return_value = mock_resp
+
         mock_llm.return_value = json.dumps({
             "competitors": [],
             "market_gap": "Unknown",
@@ -125,11 +146,15 @@ class TestPhase2ContextInjection(unittest.TestCase):
                          "Empty context must not inject prior phase section")
         print(f"[PASS] Empty context backward-compat verified")
 
-    @patch("agents.specialist.competitor_intel_agent.search_web", return_value=[])
-    @patch("agents.specialist.competitor_intel_agent.format_search_results", return_value="No results.")
+    @patch("agents.search_agent.requests.post")
     @patch("llm.router.get_llm_response")
-    def test_context_is_truncated_at_3000_chars(self, mock_llm, mock_fmt, mock_search):
+    def test_context_is_truncated_at_3000_chars(self, mock_llm, mock_serper):
         """Very long Phase 1 output must be capped to avoid token overflow."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = _fake_serper_response(1)
+        mock_serper.return_value = mock_resp
+
         mock_llm.return_value = json.dumps({
             "competitors": [],
             "market_gap": "Unknown",
@@ -160,8 +185,7 @@ class TestPhase2ContextInjection(unittest.TestCase):
         if not user_message:
             user_message = call_kwargs[0][2] if len(call_kwargs[0]) > 2 else ""
 
-        # The context portion must be capped — full user_message may be longer
-        # due to other sections, but the X's should not exceed 3000
+        # The context portion must be capped
         x_count = user_message.count("X")
         self.assertLessEqual(x_count, 3000,
                              f"Context must be capped at 3000 chars, got {x_count} X's")
