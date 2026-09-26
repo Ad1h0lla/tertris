@@ -144,6 +144,7 @@ def route_to_specialist(
             return run_competitor_intel(
                 confirmed_goal=_goal_text(confirmed_goal),
                 idea_type=confirmed_goal.get("idea_type", "saas") if isinstance(confirmed_goal, dict) else "saas",
+                context=context,
             )
 
         if agent_type == "pricing":

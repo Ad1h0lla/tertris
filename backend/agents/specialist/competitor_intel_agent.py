@@ -19,7 +19,8 @@ load_dotenv()
 
 def run_competitor_intel(
     confirmed_goal: str,
-    idea_type: str
+    idea_type: str,
+    context: str = "",
 ) -> dict:
 
     default_response = {
@@ -84,9 +85,18 @@ Return ONLY valid JSON with this structure:
   "total_competitors_found": 3
 }"""
 
+        # Build prior-phase context section (Phase 1 output, acceptance criteria, etc.)
+        prior_context_section = ""
+        if context and context.strip():
+            prior_context_section = (
+                f"\n\n--- Prior Phase Output (what has already been built) ---\n"
+                f"{context[:3000]}"  # Cap to avoid token overflow
+            )
+
         user_message = (
             f"Product Idea: {confirmed_goal}"
             f"\nCategory: {idea_type}"
+            f"{prior_context_section}"
             f"\n\n--- Competitor Discovery Results ---\n"
             f"{discovery_text}"
             f"\n\n--- Competitor Pricing Results ---\n"

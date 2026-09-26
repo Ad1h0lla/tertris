@@ -103,9 +103,13 @@ def run_full_execution_audit():
     print(f"Agent: {agent_p2['name']} ({agent_p2['type']})")
     assert agent_p2['type'] == "competitor_intel"
 
+    # Build Phase 1 context to chain into Phase 2 (mirrors main.py lines 299-312)
+    phase1_outcome = json.dumps(out_p1, indent=2, default=str) if isinstance(out_p1, dict) else str(out_p1)
+    phase1_context = f"--- Phase 1 (code) Output ---\n{phase1_outcome}"
+
     ws_p2 = os.path.join(_BACKEND_DIR, "generated_projects", execution_id, "phase_2")
     os.makedirs(ws_p2, exist_ok=True)
-    out_p2 = route_to_specialist("competitor_intel", goal_dict, context="", phase=2)
+    out_p2 = route_to_specialist("competitor_intel", goal_dict, context=phase1_context, phase=2)
 
     art_file_p2 = os.path.join(ws_p2, "phase_2_deliverable.json")
     with open(art_file_p2, "w", encoding="utf-8") as f:
