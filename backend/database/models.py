@@ -143,7 +143,22 @@ class PhaseResult(Base):
         nullable=True
     )
 
+    simulation_result = Column(
+        JSON,
+        nullable=True
+    )
+
+    deployment_result = Column(
+        JSON,
+        nullable=True
+    )
+
     review_result = Column(
+        JSON,
+        nullable=True
+    )
+
+    distribution_plan = Column(
         JSON,
         nullable=True
     )
@@ -272,6 +287,66 @@ class ConnectorAction(Base):
     )
 
 
+class DistributionCampaign(Base):
+    __tablename__ = "distribution_campaigns"
+
+    id = Column(
+        String,
+        primary_key=True
+    )
+
+    execution_id = Column(
+        String,
+        index=True
+    )
+
+    user_id = Column(
+        String,
+        index=True
+    )
+
+    phase = Column(
+        Integer,
+        default=3
+    )
+
+    status = Column(
+        String,
+        default="PLANNED"
+    )
+
+    actions = Column(
+        JSON,
+        nullable=True
+    )
+
+    summary = Column(
+        JSON,
+        nullable=True
+    )
+
+    connector_requirements = Column(
+        JSON,
+        nullable=True
+    )
+
+    events = Column(
+        JSON,
+        nullable=True
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow
+    )
+
+
 def init_db():
     """Create all tables on startup and apply missing column migrations."""
     Base.metadata.create_all(
@@ -289,7 +364,10 @@ def init_db():
             "ALTER TABLE phase_results ADD COLUMN approved_at DATETIME;",
             "ALTER TABLE phase_results ADD COLUMN selected_agents JSON;",
             "ALTER TABLE phase_results ADD COLUMN verification_result JSON;",
+            "ALTER TABLE phase_results ADD COLUMN simulation_result JSON;",
+            "ALTER TABLE phase_results ADD COLUMN deployment_result JSON;",
             "ALTER TABLE phase_results ADD COLUMN review_result JSON;",
+            "ALTER TABLE phase_results ADD COLUMN distribution_plan JSON;",
             "ALTER TABLE phase_results ADD COLUMN error_message TEXT;",
             "ALTER TABLE executions ADD COLUMN phase_names JSON;",
         ]:

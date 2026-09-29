@@ -85,22 +85,23 @@ class TestPhase2ContextInjection(unittest.TestCase):
             phase=2,
         )
 
-        # 1. LLM was called
-        mock_llm.assert_called_once()
+        # 1. LLM was called (competitor_intel + pricing chained)
+        self.assertGreaterEqual(mock_llm.call_count, 1)
 
-        # 2. Phase 1 content appears in user_message
-        call_kwargs = mock_llm.call_args
-        user_message = call_kwargs.kwargs.get("user_message") or call_kwargs[1].get("user_message", "")
-        if not user_message:
-            user_message = call_kwargs[0][2] if len(call_kwargs[0]) > 2 else ""
+        # 2. Phase 1 content appears in competitor_intel user_message
+        comp_call = mock_llm.call_args_list[0]
+        user_message = comp_call.kwargs.get("user_message") or comp_call[1].get("user_message", "")
+        if not user_message and len(comp_call[0]) > 2:
+            user_message = comp_call[0][2]
 
         self.assertIn("Phase 1", user_message, "Phase 1 header must appear in user_message")
         self.assertIn("streak tracker", user_message, "Phase 1 feature details must appear")
         self.assertIn("dashboard", user_message, "Phase 1 feature details must appear")
 
-        # 3. Result is valid competitor_intel JSON
-        self.assertIn("competitors", result)
-        self.assertGreater(result["total_competitors_found"], 0)
+        # 3. Result is valid competitor_intel or combined Phase 2 JSON
+        comp_data = result.get("competitor_intel", result)
+        self.assertIn("competitors", comp_data)
+        self.assertGreater(comp_data["total_competitors_found"], 0)
         print(f"[PASS] Context injection verified: user_message contains Phase 1 output")
         print(f"  user_message length: {len(user_message)} chars")
 
@@ -134,13 +135,13 @@ class TestPhase2ContextInjection(unittest.TestCase):
             phase=2,
         )
 
-        mock_llm.assert_called_once()
+        self.assertGreaterEqual(mock_llm.call_count, 1)
 
         # user_message should NOT contain Phase 1 header when context is empty
-        call_kwargs = mock_llm.call_args
-        user_message = call_kwargs.kwargs.get("user_message") or call_kwargs[1].get("user_message", "")
-        if not user_message:
-            user_message = call_kwargs[0][2] if len(call_kwargs[0]) > 2 else ""
+        comp_call = mock_llm.call_args_list[0]
+        user_message = comp_call.kwargs.get("user_message") or comp_call[1].get("user_message", "")
+        if not user_message and len(comp_call[0]) > 2:
+            user_message = comp_call[0][2]
 
         self.assertNotIn("Prior Phase Output", user_message,
                          "Empty context must not inject prior phase section")
@@ -178,12 +179,12 @@ class TestPhase2ContextInjection(unittest.TestCase):
             phase=2,
         )
 
-        mock_llm.assert_called_once()
+        self.assertGreaterEqual(mock_llm.call_count, 1)
 
-        call_kwargs = mock_llm.call_args
-        user_message = call_kwargs.kwargs.get("user_message") or call_kwargs[1].get("user_message", "")
-        if not user_message:
-            user_message = call_kwargs[0][2] if len(call_kwargs[0]) > 2 else ""
+        comp_call = mock_llm.call_args_list[0]
+        user_message = comp_call.kwargs.get("user_message") or comp_call[1].get("user_message", "")
+        if not user_message and len(comp_call[0]) > 2:
+            user_message = comp_call[0][2]
 
         # The context portion must be capped
         x_count = user_message.count("X")

@@ -37,6 +37,15 @@ if _RECOVERED not in sys.path:
 # ── Import the recovered app (registers 29 routes + CORS) ────────────────────
 from main_working import app  # noqa: E402
 
+# ── M3.5-A: Ensure all DB tables (incl. stored_credentials) exist ─────────────
+import sys as _sys
+_backend_dir = os.path.dirname(os.path.abspath(__file__))
+if _backend_dir not in _sys.path:
+    _sys.path.insert(0, _backend_dir)
+from database.models import init_db as _init_db
+_init_db()
+print('[main.py] init_db() called — stored_credentials table guaranteed.')
+
 # ── Fix CORS for the Vite frontend on port 5173 ───────────────────────────────
 # The recovered backend only allows localhost:3000.
 # Starlette's Middleware namedtuple: Middleware(cls, **kwargs)
@@ -123,6 +132,12 @@ class NextPhaseRequest(BaseModel):
     user_id: str = 'user_001'
     phase: int = 1
     review_mode: str = 'auto'
+
+
+class ExecuteDistributionActionRequest(BaseModel):
+    action: Dict[str, Any]
+    user_id: str = 'user_001'
+    approved: bool = True
 
 
 # ── Fixed route handlers ──────────────────────────────────────────────────────
@@ -239,6 +254,7 @@ async def _execute_agent_fixed(body: ExecuteAgentRequest):
     from orchestrator.router import route_to_specialist
     from execution.runner import run_controlled_verification
     from agents.reviewer_agent import run_reviewer
+    from simulation.engine import run_simulation
 
     goal_dict = dict(body.confirmed_goal or {})
     execution_id = body.execution_id or goal_dict.get("execution_id") or str(uuid.uuid4())
@@ -341,6 +357,7 @@ async def _execute_agent_fixed(body: ExecuteAgentRequest):
         files_written.append(f"phase_{phase_num}_deliverable.md")
 
     runner_res = run_controlled_verification(workspace_path)
+    sim_res = run_simulation(workspace_path=workspace_path, acceptance_criteria=criteria)
 
     review_res = run_reviewer(
         confirmed_goal=goal_text,
@@ -349,11 +366,13 @@ async def _execute_agent_fixed(body: ExecuteAgentRequest):
         built_output=agent_output,
         workspace_path=workspace_path,
         runner_result=runner_res,
+        simulation_result=sim_res,
     )
 
     runner_passed = bool(runner_res.get("passed")) if isinstance(runner_res, dict) else False
+    sim_passed = (sim_res.get("simulation_status") != "FAIL") if isinstance(sim_res, dict) else True
     reviewer_passed = bool(review_res.get("passed")) if isinstance(review_res, dict) else False
-    phase_passed = runner_passed and reviewer_passed
+    phase_passed = runner_passed and sim_passed and reviewer_passed
     phase_status = "WAITING_FOR_APPROVAL" if phase_passed else "REVISION_REQUIRED"
     exec_status = "waiting_for_approval" if phase_passed else "revision_required"
     db = SessionLocal()
@@ -362,8 +381,21 @@ async def _execute_agent_fixed(body: ExecuteAgentRequest):
             {"step": "agent_selected", "type": agent_type, "name": assigned_agent["name"]},
             {"step": "agent_completed", "phase": phase_num},
             {"step": "runner_completed", "passed": runner_res.get("passed"), "exit_code": runner_res.get("exit_code")},
+            {"step": "simulation_completed", "status": sim_res.get("simulation_status"), "passed_checks": sim_res.get("passed_checks"), "total_checks": sim_res.get("total_checks")},
             {"step": "reviewer_completed", "score": review_res.get("score"), "passed": phase_passed},
         ]
+
+        deploy_res = agent_output.get("deployment") if isinstance(agent_output, dict) else None
+        if deploy_res:
+            trace.append({
+                "step": "deployment_completed",
+                "provider": deploy_res.get("provider"),
+                "status": deploy_res.get("deployment_status"),
+                "url": deploy_res.get("url"),
+                "verified": deploy_res.get("verified"),
+            })
+
+        dist_plan = agent_output.get("distribution_plan") if isinstance(agent_output, dict) else None
 
         save_phase_result(
             db=db,
@@ -376,7 +408,10 @@ async def _execute_agent_fixed(body: ExecuteAgentRequest):
             status=phase_status,
             selected_agents=[assigned_agent],
             verification_result=runner_res,
+            simulation_result=sim_res,
+            deployment_result=deploy_res,
             review_result=review_res,
+            distribution_plan=dist_plan,
         )
 
         phase_statuses[str(phase_num)] = phase_status
@@ -384,7 +419,7 @@ async def _execute_agent_fixed(body: ExecuteAgentRequest):
     finally:
         db.close()
 
-    return {
+    resp_payload = {
         "stage": exec_status,
         "execution_id": execution_id,
         "phase": phase_num,
@@ -395,8 +430,17 @@ async def _execute_agent_fixed(body: ExecuteAgentRequest):
         "files_written": files_written,
         "outcome": outcome_markdown,
         "runner_result": runner_res,
+        "simulation_result": sim_res,
         "validation": review_res,
     }
+    if deploy_res:
+        resp_payload["deployment_result"] = deploy_res
+        resp_payload["deployment_status"] = deploy_res.get("deployment_status")
+        resp_payload["url"] = deploy_res.get("url")
+    if dist_plan:
+        resp_payload["distribution_plan"] = dist_plan
+        resp_payload["distribution_actions"] = dist_plan.get("actions", [])
+    return resp_payload
 
 
 async def _approve_fixed(body: ApproveRequest):
@@ -577,6 +621,9 @@ async def _get_execution_status_fixed(execution_id: str, user_id: str = "user_00
                 "validation_score": pr.validation_score,
                 "status": pr.status,
                 "verification_result": pr.verification_result,
+                "simulation_result": getattr(pr, "simulation_result", None),
+                "deployment_result": getattr(pr, "deployment_result", None),
+                "distribution_plan": getattr(pr, "distribution_plan", None),
                 "review_result": pr.review_result,
             }
 
@@ -621,6 +668,42 @@ async def _get_execution_status_fixed(execution_id: str, user_id: str = "user_00
         has_web_portal = os.path.exists(p1_index)
         web_portal_url = f"http://localhost:8000/projects/{execution_id}/phase_1/index.html" if has_web_portal else None
 
+        # Top-level portal check (Phase 1 index.html)
+        p1_index = os.path.join(projects_dir_local, execution_id, "phase_1", "index.html")
+        has_web_portal = os.path.exists(p1_index)
+        web_portal_url = f"http://localhost:8000/projects/{execution_id}/phase_1/index.html" if has_web_portal else None
+
+        # Fetch executed connector/distribution actions
+        from database.operations import get_connector_actions, get_distribution_campaign_by_execution
+        conn_acts = get_connector_actions(db, execution_id)
+        connector_actions_list = [
+            {
+                "id": ca.id,
+                "connector_id": ca.connector_id,
+                "action": ca.action,
+                "status": ca.status,
+                "result": ca.result,
+                "error": ca.error,
+                "executed_at": ca.executed_at.isoformat() if ca.executed_at else None,
+            }
+            for ca in conn_acts
+        ]
+
+        # Fetch canonical distribution campaign if one exists for this execution
+        camp = get_distribution_campaign_by_execution(db, execution_id)
+        distribution_campaign_data = None
+        if camp:
+            try:
+                from orchestration.distribution_orchestrator import get_canonical_campaign
+                distribution_campaign_data = get_canonical_campaign(db, camp.id)
+            except Exception:
+                distribution_campaign_data = {
+                    "campaign_id": camp.id,
+                    "status": camp.status,
+                    "summary": camp.summary or {},
+                    "connector_requirements": camp.connector_requirements or [],
+                }
+
         return {
             "execution_id": execution_id,
             "status": ex.status,
@@ -629,9 +712,31 @@ async def _get_execution_status_fixed(execution_id: str, user_id: str = "user_00
             "recommended_phases": rec_phases,
             "workflow": workflow,
             "phase_outputs": phase_outputs,
+            "connector_actions": connector_actions_list,
+            "distribution_campaign": distribution_campaign_data,
             "has_web_portal": has_web_portal,
             "web_portal_url": web_portal_url,
         }
+    finally:
+        db.close()
+
+
+async def _execute_distribution_action_fixed(body: ExecuteDistributionActionRequest):
+    """
+    POST /execute/distribution-action & POST /execute/action — executes an approved distribution action.
+    """
+    from database.models import SessionLocal
+    from execution.execution_router import execute_distribution_action
+
+    action_dict = dict(body.action or {})
+    if body.approved:
+        if "approval" not in action_dict or not isinstance(action_dict["approval"], dict):
+            action_dict["approval"] = {}
+        action_dict["approval"]["status"] = "APPROVED"
+
+    db = SessionLocal()
+    try:
+        return execute_distribution_action(action=action_dict, user_id=body.user_id, db=db)
     finally:
         db.close()
 
@@ -673,18 +778,88 @@ async def _list_projects_fixed(user_id: str = "user_001"):
         db.close()
 
 
+async def _get_simulation_result_fixed(execution_id: str):
+    """
+    GET /simulation/{execution_id} — retrieves pre-launch simulation results for a project.
+    """
+    from fastapi import HTTPException
+    from database.models import SessionLocal
+    from database.operations import get_phase_results, get_execution_by_id
+
+    db = SessionLocal()
+    try:
+        ex = get_execution_by_id(db, execution_id)
+        if not ex:
+            raise HTTPException(status_code=404, detail=f"Execution '{execution_id}' not found.")
+
+        phase_results = get_phase_results(db, execution_id)
+        sim_res = None
+        for pr in phase_results:
+            if getattr(pr, "simulation_result", None):
+                sim_res = pr.simulation_result
+                break
+
+        if not sim_res:
+            workspace_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_projects", execution_id, "phase_1")
+            if os.path.exists(workspace_path):
+                from simulation.engine import run_simulation
+                sim_res = run_simulation(workspace_path)
+            else:
+                return {
+                    "execution_id": execution_id,
+                    "simulation_status": "NOT_TESTED",
+                    "message": "No generated workspace found for simulation",
+                    "checks": [],
+                    "acceptance_criteria": [],
+                    "issues": [],
+                }
+
+        return {
+            "execution_id": execution_id,
+            **sim_res
+        }
+    finally:
+        db.close()
+
+
 # ── Remove broken routes and add fixed ones ────────────────────────────────────
 
 from fastapi.routing import APIRoute
 
-_PATHS_TO_FIX = {'/intake', '/intake/reply', '/execute', '/execute/agent', '/approve', '/next-phase'}
+# M3.5-A: Remove broken decompiled credential handlers from recovered app.
+# The correct handlers are registered below via the credentials router.
+_BROKEN_CREDENTIAL_PATHS = {
+    '/credentials/connect',
+    '/credentials/{user_id}',
+    '/credentials/{user_id}/{app_name}',
+    '/connect-app',
+    '/connected-apps/{user_id}',
+}
+for _cp in list(app.router.routes):
+    if isinstance(_cp, APIRoute) and _cp.path in _BROKEN_CREDENTIAL_PATHS:
+        app.router.routes.remove(_cp)
+print('[main.py] Removed broken decompiled credential routes.')
+
+# M3.5-A: Mount authoritative credential routes
+from routes.credentials import router as _credentials_router
+app.include_router(_credentials_router)
+print('[main.py] Mounted M3.5-A credential router at /credentials')
+
+# M3.5-B: Mount authoritative distribution orchestrator routes
+from routes.distribution import router as _distribution_router
+app.include_router(_distribution_router)
+print('[main.py] Mounted M3.5-B distribution router at /distribution')
+
+_PATHS_TO_FIX = {'/intake', '/intake/reply', '/execute', '/execute/agent', '/approve', '/next-phase', '/execute/distribution-action', '/execute/action'}
 _FIXED_HANDLERS = {
-    '/intake':        _intake_fixed,
-    '/intake/reply':  _intake_reply_fixed,
-    '/execute':       _execute_fixed,
-    '/execute/agent': _execute_agent_fixed,
-    '/approve':       _approve_fixed,
-    '/next-phase':    _next_phase_fixed,
+    '/intake':                      _intake_fixed,
+    '/intake/reply':                _intake_reply_fixed,
+    '/execute':                     _execute_fixed,
+    '/execute/agent':               _execute_agent_fixed,
+    '/approve':                     _approve_fixed,
+    '/next-phase':                  _next_phase_fixed,
+    '/execute/distribution-action': _execute_distribution_action_fixed,
+    '/execute/action':              _execute_distribution_action_fixed,
 }
 
 router_routes = app.router.routes
@@ -719,6 +894,14 @@ status_route = APIRoute(
     response_model=None,
 )
 router_routes.append(status_route)
+
+simulation_route = APIRoute(
+    path='/simulation/{execution_id}',
+    endpoint=_get_simulation_result_fixed,
+    methods={'GET'},
+    response_model=None,
+)
+router_routes.append(simulation_route)
 
 projects_route = APIRoute(
     path='/api/projects',

@@ -140,12 +140,63 @@ def route_to_specialist(
             )
 
         if agent_type == "competitor_intel":
+            # Phase 2 chain: Competitor Intel → Pricing
+            # This is the real information pipeline for Phase 2.
             from agents.specialist.competitor_intel_agent import run_competitor_intel
-            return run_competitor_intel(
-                confirmed_goal=_goal_text(confirmed_goal),
-                idea_type=confirmed_goal.get("idea_type", "saas") if isinstance(confirmed_goal, dict) else "saas",
+            from agents.specialist.pricing_agent import run_pricing
+
+            goal_text = _goal_text(confirmed_goal)
+            idea_type = confirmed_goal.get("idea_type", "saas") if isinstance(confirmed_goal, dict) else "saas"
+
+            # Step 1: Competitor Intelligence (with real Serper search)
+            competitor_result = run_competitor_intel(
+                confirmed_goal=goal_text,
+                idea_type=idea_type,
                 context=context,
             )
+
+            # Step 2: Pricing (fed actual competitor output)
+            pricing_result = run_pricing(
+                confirmed_goal=goal_text,
+                competitor_data=competitor_result,
+                idea_type=idea_type,
+                context=context,
+            )
+
+            # Build combined Phase 2 result
+            competitor_status = competitor_result.get("search_status", "UNKNOWN") if isinstance(competitor_result, dict) else "FAILED"
+            pricing_status = pricing_result.get("pricing_status", "UNKNOWN") if isinstance(pricing_result, dict) else "FAILED"
+
+            dist_intel = competitor_result.get("distribution_intelligence") if isinstance(competitor_result, dict) else None
+            if not isinstance(dist_intel, dict):
+                dist_intel = {
+                    "audiences": [],
+                    "customer_problems": [],
+                    "communities": [],
+                    "channels": [],
+                    "content_angles": [],
+                    "distribution_opportunities": [],
+                }
+
+            # Determine overall Phase 2 status
+            if competitor_status == "SUCCESS" and pricing_status in ("SUCCESS", "DEGRADED"):
+                overall_status = "SUCCESS"
+            elif competitor_status == "FAILED" and pricing_status == "FAILED":
+                overall_status = "FAILED"
+            else:
+                overall_status = "DEGRADED"
+
+            return {
+                "phase_2_status": overall_status,
+                "competitor_intel": competitor_result,
+                "pricing": pricing_result,
+                "distribution_intelligence": dist_intel,
+                "source_urls": competitor_result.get("source_urls", []) if isinstance(competitor_result, dict) else [],
+                "research_source": competitor_result.get("research_source", "none") if isinstance(competitor_result, dict) else "none",
+                "search_status": competitor_status,
+                "pricing_status": pricing_status,
+                "chain": ["competitor_intel", "pricing"],
+            }
 
         if agent_type == "pricing":
             from agents.specialist.pricing_agent import run_pricing
@@ -153,14 +204,23 @@ def route_to_specialist(
                 confirmed_goal=_goal_text(confirmed_goal),
                 competitor_data={},
                 idea_type=confirmed_goal.get("idea_type", "saas") if isinstance(confirmed_goal, dict) else "saas",
+                context=context,
             )
 
         if agent_type == "deployment_prep":
             from agents.specialist.deployment_prep_agent import run_deployment_prep
+            sim_res = confirmed_goal.get("simulation_result") if isinstance(confirmed_goal, dict) else None
+            ws_path = confirmed_goal.get("_workspace_path") if isinstance(confirmed_goal, dict) else None
+            if ws_path and not any(os.path.exists(os.path.join(ws_path, f)) for f in ("index.html", "package.json", "app.py")):
+                p1_ws = os.path.join(os.path.dirname(ws_path), "phase_1")
+                if os.path.exists(p1_ws):
+                    ws_path = p1_ws
             return run_deployment_prep(
                 code_output=context,
                 project_name=_goal_text(confirmed_goal)[:30] or "Project",
                 outcome_type=outcome_type,
+                workspace_path=ws_path,
+                simulation_result=sim_res,
             )
 
         if agent_type == "automation":
@@ -190,10 +250,12 @@ def route_to_specialist(
 
         if agent_type == "campaign":
             from agents.specialist.campaign_agent import run_campaign
+            exec_id = (confirmed_goal.get("_execution_id") or confirmed_goal.get("execution_id")) if isinstance(confirmed_goal, dict) else ""
             return run_campaign(
                 goal=_goal_text(confirmed_goal),
                 context=context,
                 phase=phase,
+                execution_id=exec_id,
             )
 
         if agent_type == "planner":

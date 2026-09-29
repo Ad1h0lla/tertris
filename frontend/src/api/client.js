@@ -164,23 +164,60 @@ class ApiClient {
     });
   }
 
-  // ─── Connectors ───────────────────────────────────────────────────────────────
+  // ─── Connectors (M3.5-A) ─────────────────────────────────────────────────────
 
+  /**
+   * List all active credential records for a user.
+   * Returns metadata only — no raw secrets.
+   */
   async getConnectors(userId = 'user_001') {
     return this.request(`/credentials/${userId}`, 'GET');
   }
 
-  async connectApp(appName, credential, connectionType = 'api_key', displayName = null, userId = 'user_001') {
-    if (!credential || credential.startsWith('mock_')) {
-      throw new Error('connectApp: real credential required — do not pass mock tokens');
+  /**
+   * Store structured credentials for a platform.
+   *
+   * @param {string}  appName      - e.g. 'reddit', 'twitter', 'linkedin', 'sendgrid', 'smtp'
+   * @param {object}  credentials  - structured key→value dict matching the platform schema
+   * @param {string}  [connectionType]
+   * @param {string}  [displayName]
+   * @param {string}  [userId]
+   */
+  async connectApp(appName, credentials, connectionType = 'api_key', displayName = null, userId = 'user_001') {
+    // Guard: credentials must be a non-empty object
+    if (!credentials || typeof credentials !== 'object' || Array.isArray(credentials)) {
+      throw new Error('connectApp: credentials must be a non-empty object');
     }
     return this.request('/credentials/connect', 'POST', {
-      app_name: appName,
-      credential,
+      app_name:        appName,
+      credentials,
       connection_type: connectionType,
-      display_name: displayName,
-      user_id: userId,
+      display_name:    displayName,
+      user_id:         userId,
     });
+  }
+
+  /**
+   * Soft-delete (deactivate) a stored credential.
+   */
+  async disconnectApp(appName, userId = 'user_001') {
+    return this.request(`/credentials/${userId}/${appName}`, 'DELETE');
+  }
+
+  /**
+   * Live-verify stored credentials for a platform without performing any write action.
+   * Returns { status, verified, display_name, error }.
+   */
+  async testConnector(appName, userId = 'user_001') {
+    return this.request(`/credentials/test/${appName}?user_id=${userId}`, 'POST');
+  }
+
+  /**
+   * Fetch connected/verified readiness for all distribution platforms.
+   * Used by the Distribution Orchestrator to gate campaign execution.
+   */
+  async getReadiness(userId = 'user_001') {
+    return this.request(`/credentials/readiness/${userId}`, 'GET');
   }
 
   // ─── Bots ─────────────────────────────────────────────────────────────────────
@@ -219,6 +256,48 @@ class ApiClient {
   async getProjects() {
     return this.request('/api/projects', 'GET');
   }
+
+  // ─── Distribution Campaigns (M3.5-B) ─────────────────────────────────────────
+
+  async createDistributionCampaign(executionId, userId = 'user_001', distributionPlan = null, actions = null) {
+    return this.request('/distribution/campaigns', 'POST', {
+      execution_id: executionId,
+      user_id: userId,
+      distribution_plan: distributionPlan,
+      actions: actions,
+    });
+  }
+
+  async getDistributionCampaign(campaignId) {
+    return this.request(`/distribution/campaigns/${campaignId}`, 'GET');
+  }
+
+  async checkCampaignReadiness(campaignId, userId = 'user_001') {
+    return this.request(`/distribution/campaigns/${campaignId}/check-readiness?user_id=${userId}`, 'POST');
+  }
+
+  async approveCampaignActions(campaignId, actionIds = null, approveAll = false, userId = 'user_001') {
+    return this.request(`/distribution/campaigns/${campaignId}/approve`, 'POST', {
+      user_id: userId,
+      action_ids: actionIds,
+      approve_all: approveAll,
+    });
+  }
+
+  async executeCampaign(campaignId, userId = 'user_001', actionIds = null) {
+    return this.request(`/distribution/campaigns/${campaignId}/execute`, 'POST', {
+      user_id: userId,
+      action_ids: actionIds,
+    });
+  }
+
+  async retryCampaign(campaignId, userId = 'user_001', actionIds = null) {
+    return this.request(`/distribution/campaigns/${campaignId}/retry`, 'POST', {
+      user_id: userId,
+      action_ids: actionIds,
+    });
+  }
 }
 
 export const api = new ApiClient();
+

@@ -94,7 +94,10 @@ def save_phase_result(
     phase_name=None,
     selected_agents=None,
     verification_result=None,
+    simulation_result=None,
+    deployment_result=None,
     review_result=None,
+    distribution_plan=None,
     error_message=None,
 ):
     # Upsert: update existing phase result for this phase or create new one
@@ -117,8 +120,14 @@ def save_phase_result(
             existing.selected_agents = selected_agents
         if verification_result:
             existing.verification_result = verification_result
+        if simulation_result:
+            existing.simulation_result = simulation_result
+        if deployment_result:
+            existing.deployment_result = deployment_result
         if review_result:
             existing.review_result = review_result
+        if distribution_plan:
+            existing.distribution_plan = distribution_plan
         if error_message:
             existing.error_message = error_message
         existing.completed_at = datetime.utcnow()
@@ -140,7 +149,10 @@ def save_phase_result(
         completed_at=datetime.utcnow(),
         selected_agents=selected_agents,
         verification_result=verification_result,
+        simulation_result=simulation_result,
+        deployment_result=deployment_result,
         review_result=review_result,
+        distribution_plan=distribution_plan,
         error_message=error_message,
     )
 
@@ -338,3 +350,121 @@ def delete_credential(db, user_id, app_name):
     )
 
     db.commit()
+
+
+def save_connector_action(
+    db,
+    user_id: str,
+    execution_id: str,
+    connector_id: str,
+    action: str,
+    status: str,
+    result: dict = None,
+    error: str = None,
+    action_id: str = None,
+):
+    from database.models import ConnectorAction
+    action_obj = ConnectorAction(
+        id=action_id or str(uuid.uuid4()),
+        user_id=user_id,
+        execution_id=execution_id,
+        connector_id=connector_id,
+        action=action,
+        status=status,
+        result=result or {},
+        error=error,
+        executed_at=datetime.utcnow(),
+    )
+    db.add(action_obj)
+    db.commit()
+    db.refresh(action_obj)
+    return action_obj
+
+
+def get_connector_actions(db, execution_id: str):
+    from database.models import ConnectorAction
+    return (
+        db.query(ConnectorAction)
+        .filter(ConnectorAction.execution_id == execution_id)
+        .order_by(ConnectorAction.executed_at.asc())
+        .all()
+    )
+
+
+def save_distribution_campaign(
+    db,
+    campaign_id: str,
+    execution_id: str,
+    user_id: str,
+    status: str = "PLANNED",
+    actions: list = None,
+    summary: dict = None,
+    connector_requirements: list = None,
+    events: list = None,
+    phase: int = 3,
+):
+    from database.models import DistributionCampaign
+    existing = (
+        db.query(DistributionCampaign)
+        .filter(DistributionCampaign.id == campaign_id)
+        .first()
+    )
+
+    if existing:
+        existing.status = status
+        from sqlalchemy.orm.attributes import flag_modified
+        import copy
+        if actions is not None:
+            existing.actions = copy.deepcopy(actions)
+            flag_modified(existing, "actions")
+        if summary is not None:
+            existing.summary = copy.deepcopy(summary)
+            flag_modified(existing, "summary")
+        if connector_requirements is not None:
+            existing.connector_requirements = copy.deepcopy(connector_requirements)
+            flag_modified(existing, "connector_requirements")
+        if events is not None:
+            existing.events = copy.deepcopy(events)
+            flag_modified(existing, "events")
+        existing.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    campaign_obj = DistributionCampaign(
+        id=campaign_id or f"cmp_{uuid.uuid4().hex[:12]}",
+        execution_id=execution_id,
+        user_id=user_id,
+        phase=phase,
+        status=status,
+        actions=actions or [],
+        summary=summary or {},
+        connector_requirements=connector_requirements or [],
+        events=events or [],
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(campaign_obj)
+    db.commit()
+    db.refresh(campaign_obj)
+    return campaign_obj
+
+
+def get_distribution_campaign_by_id(db, campaign_id: str):
+    from database.models import DistributionCampaign
+    return (
+        db.query(DistributionCampaign)
+        .filter(DistributionCampaign.id == campaign_id)
+        .first()
+    )
+
+
+def get_distribution_campaign_by_execution(db, execution_id: str):
+    from database.models import DistributionCampaign
+    return (
+        db.query(DistributionCampaign)
+        .filter(DistributionCampaign.execution_id == execution_id)
+        .order_by(DistributionCampaign.created_at.desc())
+        .first()
+    )
+

@@ -1,5 +1,6 @@
 import os
 import json
+from typing import Optional, Dict, Any, List
 
 from groq import Groq
 from dotenv import load_dotenv
@@ -12,26 +13,70 @@ def get_groq_client():
 
 
 def run_deployment_prep(
-    code_output: str,
-    project_name: str,
-    outcome_type: str
+    code_output: str = "",
+    project_name: str = "Project",
+    outcome_type: str = "code",
+    workspace_path: Optional[str] = None,
+    simulation_result: Optional[dict] = None,
 ) -> dict:
 
     default_response = {
-        "framework": "Unknown",
+        "framework": "Client Web App",
         "recommended_platform": "Vercel",
         "install_command": "",
         "build_command": None,
         "start_command": None,
         "environment_variables_needed": [],
         "deploy_steps": [
-            "Deploy manually via hosting provider."
+            "Deploy to Vercel production hosting."
         ],
-        "estimated_time": "Unknown",
-        "monthly_cost": "Unknown",
+        "estimated_time": "1-2 minutes",
+        "monthly_cost": "Free on hobby tier",
         "one_click_ready": False,
-        "deploy_button_url": "https://vercel.com/new"
+        "deploy_button_url": "https://vercel.com/new",
+        "pre_flight_simulation": "NOT_TESTED",
+        "deployment_status": "NOT_STARTED",
+        "url": None,
+        "deployment_id": None,
     }
+
+    # 1. Enforce pre-launch simulation gate
+    if simulation_result and isinstance(simulation_result, dict):
+        sim_status = simulation_result.get("simulation_status", "UNKNOWN")
+        default_response["pre_flight_simulation"] = sim_status
+        if sim_status == "FAIL":
+            issues = simulation_result.get("issues", [])
+            issue_msgs = [f"[{i.get('check', 'check')}]: {i.get('message', '')}" for i in issues]
+            return {
+                "framework": "Client Web App",
+                "recommended_platform": "Vercel",
+                "install_command": "",
+                "build_command": None,
+                "start_command": None,
+                "environment_variables_needed": [],
+                "deploy_steps": [
+                    "BLOCKER: Pre-launch simulation failed. Fix critical issues before deploying:",
+                ] + (issue_msgs or ["Deterministic validation detected code or configuration errors."]),
+                "estimated_time": "N/A - Blocked",
+                "monthly_cost": "N/A",
+                "one_click_ready": False,
+                "deploy_button_url": "",
+                "pre_flight_simulation": "FAIL",
+                "deployment_status": "BLOCKED",
+                "url": None,
+                "deployment_id": None,
+                "blockers": issues,
+            }
+
+    # 2. Execute Real Vercel Cloud Deployment if workspace is available
+    deploy_res = None
+    if workspace_path and os.path.exists(workspace_path):
+        from execution.vercel_executor import deploy_to_vercel
+        deploy_res = deploy_to_vercel(
+            workspace_path=workspace_path,
+            project_name=project_name,
+            simulation_result=simulation_result,
+        )
 
     try:
         code_lower = str(code_output or "").lower()
@@ -88,20 +133,33 @@ Return ONLY valid JSON:
             temperature=0.2,
         )
 
-        clean = raw_content.strip()
-        if "```json" in clean:
-            clean = clean.split("```json")[1].split("```")[0].strip()
-        elif "```" in clean:
-            clean = clean.split("```")[1].split("```")[0].strip()
-
+        guide = default_response.copy()
         try:
-            return json.loads(clean)
+            guide = json.loads(clean)
         except json.JSONDecodeError:
-            return default_response
+            guide = default_response.copy()
+
+        if deploy_res:
+            guide["deployment"] = deploy_res
+            guide["deployment_status"] = deploy_res.get("deployment_status", "UNKNOWN")
+            guide["url"] = deploy_res.get("url")
+            guide["deployment_id"] = deploy_res.get("deployment_id")
+            guide["verification_status"] = deploy_res.get("verification_status", "NOT_TESTED")
+            guide["one_click_ready"] = (deploy_res.get("deployment_status") == "SUCCESS")
+            if deploy_res.get("url"):
+                guide["deploy_button_url"] = deploy_res["url"]
+            if deploy_res.get("error"):
+                guide["error"] = deploy_res["error"]
+
+        return guide
 
     except Exception as e:
         error_response = default_response.copy()
         error_response["deploy_steps"] = [
             f"Error during deployment preparation: {str(e)}"
         ]
+        if deploy_res:
+            error_response["deployment"] = deploy_res
+            error_response["deployment_status"] = deploy_res.get("deployment_status", "UNKNOWN")
+            error_response["url"] = deploy_res.get("url")
         return error_response

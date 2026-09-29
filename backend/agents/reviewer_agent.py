@@ -26,9 +26,10 @@ def run_reviewer(
     built_output: Any = None,
     workspace_path: Optional[str] = None,
     runner_result: Optional[Dict[str, Any]] = None,
+    simulation_result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Evaluates generated application code against criteria and build runner results.
+    Evaluates generated application code against criteria, build runner results, and pre-launch simulation results.
 
     Returns:
       {
@@ -38,7 +39,9 @@ def run_reviewer(
           { "criterion": str, "passed": bool, "reason": str }
         ],
         "build_passed": bool,
+        "simulation_passed": bool,
         "runner_summary": dict,
+        "simulation_summary": dict,
         "review": str
       }
     """
@@ -142,13 +145,21 @@ def run_reviewer(
             "review": "❌ Review Failed: Workspace directory contains no valid artifacts.",
         }
 
-    # ── Check controlled runner build result ────────────────────────────────────
+    # ── Check controlled runner & simulation results ────────────────────────────
     build_passed = True
     if runner_result and isinstance(runner_result, dict):
         build_passed = runner_result.get("passed", True)
 
+    simulation_passed = True
+    if simulation_result and isinstance(simulation_result, dict):
+        simulation_passed = (simulation_result.get("simulation_status") != "FAIL")
+
     # ── Prepare LLM Code Evaluation Prompt ──────────────────────────────────────
     files_summary = "\n\n".join([f"--- FILE: {fn} ---\n{content}" for fn, content in workspace_files.items()])
+
+    sim_info = ""
+    if simulation_result and isinstance(simulation_result, dict):
+        sim_info = f"\nPRE-LAUNCH SIMULATION RESULT:\n- Status: {simulation_result.get('simulation_status', 'N/A')}\n- Checks Passed: {simulation_result.get('passed_checks', 0)}/{simulation_result.get('total_checks', 0)}\n- Failed Checks: {simulation_result.get('failed_checks', 0)}\n"
 
     prompt = f"""
 You are the Reviewer Agent inside Tetris.
@@ -168,7 +179,7 @@ CONTROLLED BUILD RUNNER RESULT:
 - Exit Code: {runner_result.get('exit_code', 0) if runner_result else 0}
 - Stdout: {runner_result.get('stdout', '') if runner_result else ''}
 - Stderr: {runner_result.get('stderr', '') if runner_result else ''}
-
+{sim_info}
 GENERATED ARTIFACT FILES ON DISK:
 {files_summary[:25000]}
 
@@ -211,7 +222,7 @@ Return a JSON object (pure JSON, no markdown) with this exact schema:
         crit_eval = eval_data.get("criteria_evaluation", [])
         passed_criteria = sum(1 for c in crit_eval if c.get("passed")) if crit_eval else 0
         crit_passed = (passed_criteria / len(crit_eval) >= 0.5) if crit_eval else True
-        passed = (bool(eval_data.get("passed", True)) or score >= 0.65 or crit_passed) and build_passed
+        passed = (bool(eval_data.get("passed", True)) or score >= 0.65 or crit_passed) and build_passed and simulation_passed
         review_text = eval_data.get("review", "Review complete.")
 
         return {
@@ -219,7 +230,9 @@ Return a JSON object (pure JSON, no markdown) with this exact schema:
             "passed": passed,
             "criteria_evaluation": crit_eval,
             "build_passed": build_passed,
+            "simulation_passed": simulation_passed,
             "runner_summary": runner_result or {},
+            "simulation_summary": simulation_result or {},
             "review": review_text,
         }
 
@@ -238,13 +251,15 @@ Return a JSON object (pure JSON, no markdown) with this exact schema:
 
         passed_count = sum(1 for c in crit_eval if c["passed"])
         overall_score = round(passed_count / max(len(acceptance_criteria), 1), 2)
-        overall_passed = (overall_score >= 0.7) and build_passed and not has_error
+        overall_passed = (overall_score >= 0.7) and build_passed and simulation_passed and not has_error
 
         return {
             "score": overall_score,
             "passed": overall_passed,
             "criteria_evaluation": crit_eval,
             "build_passed": build_passed,
+            "simulation_passed": simulation_passed,
             "runner_summary": runner_result or {},
+            "simulation_summary": simulation_result or {},
             "review": f"Review completed via content validation (score: {overall_score}, passed: {overall_passed}).",
         }
