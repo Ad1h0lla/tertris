@@ -253,6 +253,9 @@ class ContextSynchronizer:
                 art_type = raw_art.get("artifact_type", "deliverable")
                 art_id = f"art_{tid}_{art_type}" if idx == 0 else f"art_{tid}_{art_type}_{idx}"
 
+                raw_summary = raw_art.get("summary") or raw_art.get("content") or raw_art
+                summary_dict = raw_summary if isinstance(raw_summary, dict) else {"content": raw_summary}
+
                 art = Artifact(
                     artifact_id=art_id,
                     name=raw_art.get("name", f"{art_type.replace('_', ' ').title()} Deliverable"),
@@ -262,7 +265,7 @@ class ContextSynchronizer:
                     producer_task=tid,
                     status="AVAILABLE",
                     location=raw_art.get("location", ""),
-                    content_summary=_sanitize_dict_secrets(raw_art.get("summary") or raw_art.get("content") or raw_art),
+                    content_summary=_sanitize_dict_secrets(summary_dict),
                     metadata={
                         "runtime_id": rid,
                         "execution_id": eid,
@@ -277,6 +280,7 @@ class ContextSynchronizer:
             # Primary output artifact synthesis if not explicitly listed in artifacts
             primary_type = f"{wid.replace('worker_', '')}_deliverable"
             art_id = f"art_{tid}_{primary_type}"
+            output_dict = task_res.output if isinstance(task_res.output, dict) else {"output": task_res.output}
             art = Artifact(
                 artifact_id=art_id,
                 name=f"{primary_type.replace('_', ' ').title()} Deliverable",
@@ -285,7 +289,7 @@ class ContextSynchronizer:
                 producer_worker=wid,
                 producer_task=tid,
                 status="AVAILABLE",
-                content_summary=_sanitize_dict_secrets(task_res.output),
+                content_summary=_sanitize_dict_secrets(output_dict),
                 metadata={"runtime_id": rid, "execution_id": eid, "verified": True},
                 created_at=_utc_now_iso(),
             )
