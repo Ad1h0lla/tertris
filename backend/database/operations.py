@@ -364,8 +364,19 @@ def save_connector_action(
     action_id: str = None,
 ):
     from database.models import ConnectorAction
+    aid = action_id or str(uuid.uuid4())
+    existing = db.query(ConnectorAction).filter(ConnectorAction.id == aid).first()
+    if existing:
+        existing.status = status
+        existing.result = result or {}
+        existing.error = error
+        existing.executed_at = datetime.utcnow()
+        db.commit()
+        db.refresh(existing)
+        return existing
+
     action_obj = ConnectorAction(
-        id=action_id or str(uuid.uuid4()),
+        id=aid,
         user_id=user_id,
         execution_id=execution_id,
         connector_id=connector_id,

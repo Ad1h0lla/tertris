@@ -152,8 +152,13 @@ def _resolve_required_connector(action: dict, connected_platforms: set[str]) -> 
     """
     platform = (action.get("platform") or "").strip().lower()
     worker = (action.get("worker") or "").strip().lower()
+    target = action.get("target") or {}
+    meta = action.get("metadata") or {}
+    provider = str(action.get("provider") or target.get("provider") or meta.get("provider") or "").lower().strip()
 
     if platform in ("reddit",) or worker == "community":
+        if provider == "redditapis":
+            return "redditapis"
         return "reddit"
     if platform in ("twitter", "x", "x/twitter", "x / twitter"):
         return "twitter"
@@ -394,13 +399,30 @@ def check_connector_readiness(
     connector_requirements = []
     all_ready = True
     for plat in sorted(list(required_platforms)):
-        is_connected = (plat in connected_platforms)
-        if not is_connected:
-            all_ready = False
-        connector_requirements.append({
-            "platform": plat,
-            "status": "READY" if is_connected else "NOT_CONNECTED",
-        })
+        if plat == "redditapis":
+            from execution.reddit_executor import check_redditapis_readiness
+            rapis = check_redditapis_readiness(user_id=user_id, db=db)
+            is_connected = bool(rapis.get("write_ready", False))
+            if not is_connected:
+                all_ready = False
+            connector_requirements.append({
+                "platform": plat,
+                "status": "READY" if is_connected else "NOT_CONNECTED",
+                "details": {
+                    "api_key_configured": rapis["api_key_configured"],
+                    "session_configured": rapis["session_configured"],
+                    "write_ready": rapis["write_ready"],
+                    "readiness_status": rapis["status"],
+                },
+            })
+        else:
+            is_connected = (plat in connected_platforms)
+            if not is_connected:
+                all_ready = False
+            connector_requirements.append({
+                "platform": plat,
+                "status": "READY" if is_connected else "NOT_CONNECTED",
+            })
 
     # Evaluate new status
     new_status = _aggregate_campaign_status(actions, connector_requirements)
@@ -584,8 +606,8 @@ def execute_campaign(
         if exec_status == ExecutionStatus.RUNNING:
             continue
 
-        # Idempotency guard: failed actions require explicit retry
-        if exec_status == ExecutionStatus.FAILED:
+        # Idempotency guard: failed or blocked actions require explicit retry
+        if exec_status in (ExecutionStatus.FAILED, ExecutionStatus.BLOCKED):
             continue
 
         # Approval gate

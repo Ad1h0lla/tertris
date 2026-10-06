@@ -26,6 +26,7 @@ def execute_distribution_action(
                 user_id=user_id,
                 db=db,
                 reddit_client_override=reddit_client_override,
+                **kwargs,
             )
         return {
             "status": "BLOCKED",

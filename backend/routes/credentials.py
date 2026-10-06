@@ -62,6 +62,20 @@ CONNECTOR_FIELD_SCHEMAS: Dict[str, Dict[str, Any]] = {
              "placeholder": "TetrisBot/1.0 (by /u/yourname)"},
         ],
     },
+    "redditapis": {
+        "display_name": "Reddit (RedditAPIs)",
+        "connection_type": "api_key",
+        "fields": [
+            {"key": "api_key",        "label": "RedditAPIs Bearer Token", "secret": True,  "required": True,
+             "placeholder": "Bearer token from redditapis.com"},
+            {"key": "reddit_session","label": "Reddit Session Cookie (for writes)", "secret": True, "required": False,
+             "placeholder": "reddit_session cookie"},
+            {"key": "loid",          "label": "Reddit LOID Cookie (for writes)",    "secret": True, "required": False,
+             "placeholder": "loid cookie"},
+            {"key": "token_v2",      "label": "Token V2 (optional)",      "secret": True,  "required": False},
+            {"key": "csrf_token",    "label": "CSRF Token (optional)",    "secret": True,  "required": False},
+        ],
+    },
     "twitter": {
         "display_name": "X / Twitter",
         "connection_type": "api_credentials",
@@ -348,6 +362,9 @@ def test_credential(app_name: str, user_id: str = "user_001", db=Depends(get_db)
     if app_name == "reddit":
         return _test_reddit(app_name, cred)
 
+    if app_name == "redditapis":
+        return _test_redditapis(app_name, cred)
+
     if app_name == "twitter":
         return _test_twitter(app_name, cred)
 
@@ -370,6 +387,62 @@ def test_credential(app_name: str, user_id: str = "user_001", db=Depends(get_db)
         verified=False,
         error=f"Live verification not yet supported for '{app_name}'. Credentials are stored.",
     )
+
+
+def _test_redditapis(app_name: str, cred: dict) -> TestResponse:
+    from execution.reddit_executor import RedditAPIsProvider
+    secrets = [cred.get("api_key"), cred.get("reddit_session"), cred.get("loid"), cred.get("token_v2")]
+    api_key = cred.get("api_key") or cred.get("REDDITAPIS_API_KEY") or cred.get("token")
+    if not api_key:
+        return TestResponse(
+            status="AUTH_REQUIRED",
+            app_name=app_name,
+            verified=False,
+            error="REDDITAPIS_API_KEY missing in credentials.",
+        )
+
+    session_cookies = {}
+    nested = cred.get("session_cookies") if isinstance(cred.get("session_cookies"), dict) else {}
+    for k in ("reddit_session", "loid", "token_v2", "csrf_token"):
+        v = cred.get(k) or nested.get(k)
+        if v:
+            session_cookies[k] = str(v).strip()
+
+    provider = RedditAPIsProvider(api_key=api_key, session_cookies=session_cookies)
+    try:
+        # Perform read identity check
+        res = provider.search(query="api", subreddit="webdev", limit=1)
+        if not res.get("success"):
+            return TestResponse(
+                status=res.get("status", "AUTH_FAILED"),
+                app_name=app_name,
+                verified=False,
+                error=_mask_secrets(res.get("error", "RedditAPIs read verification failed."), secrets),
+            )
+
+        readiness = provider.check_readiness()
+        if readiness.get("write_ready"):
+            return TestResponse(
+                status="CONNECTED",
+                app_name=app_name,
+                verified=True,
+                display_name="RedditAPIs (Write Ready)",
+            )
+        else:
+            return TestResponse(
+                status="CONNECTED",
+                app_name=app_name,
+                verified=True,
+                display_name="RedditAPIs (Read Only)",
+                error="Reddit session bridge cookies (reddit_session, loid) missing. Write actions require session cookies.",
+            )
+    except Exception as exc:
+        return TestResponse(
+            status="AUTH_FAILED",
+            app_name=app_name,
+            verified=False,
+            error=_mask_secrets(str(exc), secrets),
+        )
 
 
 def _test_reddit(app_name: str, cred: dict) -> TestResponse:
@@ -565,18 +638,31 @@ def get_readiness(user_id: str, db=Depends(get_db)):
     Does NOT perform live API calls — returns stored credential existence only.
     For live verification use POST /credentials/test/{app_name}.
     """
-    distribution_platforms = ["reddit", "twitter", "linkedin", "sendgrid", "smtp"]
+    distribution_platforms = ["reddit", "twitter", "linkedin", "sendgrid", "smtp", "redditapis"]
 
     active_creds = get_connected_apps(db, user_id)
     connected_set = {c["app_name"] for c in active_creds}
 
-    readiness: Dict[str, Dict[str, bool]] = {}
+    readiness: Dict[str, Dict[str, Any]] = {}
     for platform in distribution_platforms:
-        readiness[platform] = {
-            "connected": platform in connected_set,
-            # verified = False here; use /test/{app_name} to set to True
-            "verified": False,
-        }
+        if platform == "redditapis":
+            from execution.reddit_executor import check_redditapis_readiness
+            rapis = check_redditapis_readiness(user_id=user_id, db=db)
+            readiness[platform] = {
+                "connected": rapis["api_key_configured"],
+                "api_key_configured": rapis["api_key_configured"],
+                "session_configured": rapis["session_configured"],
+                "write_ready": rapis["write_ready"],
+                "status": rapis["status"],
+                "missing": rapis["missing"],
+                "verified": False,
+            }
+        else:
+            readiness[platform] = {
+                "connected": platform in connected_set,
+                # verified = False here; use /test/{app_name} to set to True
+                "verified": False,
+            }
 
     return {
         "user_id": user_id,
