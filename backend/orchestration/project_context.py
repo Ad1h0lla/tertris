@@ -26,7 +26,7 @@ import logging
 from typing import Any, Dict, List, Optional, Set
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,16 @@ class Artifact(BaseModel):
     model_config = {
         "extra": "ignore",
     }
+
+    @model_validator(mode="before")
+    @classmethod
+    def _handle_content_alias(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "content" in data and "content_summary" not in data:
+                data["content_summary"] = data.pop("content")
+            if "name" not in data:
+                data["name"] = data.get("artifact_type", "Deliverable").replace("_", " ").title()
+        return data
 
     def to_dict(self) -> Dict[str, Any]:
         return _sanitize_dict_secrets(self.model_dump())
@@ -304,7 +314,16 @@ class ProjectContext(BaseModel):
             "research": {"deep_research", "market_trends", "domain_research"},
             "competitor_intelligence": {"competitor_analysis", "competitor_intel", "market_research"},
             "simulation": {"simulation_result", "qa_test", "smoke_test", "qa_report"},
-            "distribution": {"distribution_plan", "campaign_strategy", "outreach_sequence"},
+            "distribution": {
+                "distribution_plan",
+                "campaign_strategy",
+                "outreach_sequence",
+                "reddit_post_receipt",
+                "x_tweet_receipt",
+                "linkedin_post_receipt",
+                "email_dispatch_receipt",
+                "distribution_receipt",
+            },
             "deployment": {"deployment_bundle", "deployment_manifest", "live_service", "deployment_receipt", "deployment_result", "deployment_url"},
             "launch_verification": {"launch_verification", "launch_receipt", "launch_report", "live_verification", "smoke_check"},
             "launch": {"launch_verification", "launch_receipt", "launch_report", "live_verification", "smoke_check"},
@@ -356,8 +375,14 @@ class ProjectContext(BaseModel):
         self.updated_at = _utc_now_iso()
 
     def get_artifact(self, artifact_id: str) -> Optional[Artifact]:
-        """Retrieves an Artifact by ID."""
-        return self.artifacts.get(artifact_id.strip())
+        """Retrieves an Artifact by ID, or falls back to matching by artifact_type."""
+        clean_id = artifact_id.strip()
+        if clean_id in self.artifacts:
+            return self.artifacts[clean_id]
+        for art in self.artifacts.values():
+            if art.artifact_type.lower() == clean_id.lower():
+                return art
+        return None
 
     def get_artifacts_by_type(self, artifact_type: str) -> List[Artifact]:
         """Retrieves all artifacts matching a given artifact_type."""
@@ -445,12 +470,58 @@ class ProjectContext(BaseModel):
         for art in self.artifacts.values():
             if art.artifact_type in ("launch_verification", "launch_receipt") and art.status == "AVAILABLE":
                 summary = art.content_summary or {}
-                if summary.get("status") == "LIVE" or summary.get("is_live") is True or art.metadata.get("verification_status") == "PASS":
+                if (
+                    summary.get("status") == "LIVE"
+                    or summary.get("is_live") is True
+                    or summary.get("verification_status") == "PASS"
+                    or summary.get("verified") is True
+                    or art.metadata.get("verification_status") == "PASS"
+                ):
                     return True
         phase_ref = self.phase_history.get("phase_launch_verification")
         if phase_ref and phase_ref.status == "COMPLETED" and phase_ref.verification_status == "PASS":
             return True
         return False
+
+    @property
+    def is_distributed(self) -> bool:
+        """
+        Returns True if at least one verified distribution receipt exists in context.
+        """
+        distribution_receipt_types = {
+            "reddit_post_receipt",
+            "x_tweet_receipt",
+            "linkedin_post_receipt",
+            "email_dispatch_receipt",
+            "distribution_receipt",
+        }
+        for art in self.artifacts.values():
+            if art.artifact_type in distribution_receipt_types and art.status == "AVAILABLE":
+                if art.metadata.get("verification_status") == "PASS" or art.content_summary.get("status") == "SUCCESS":
+                    return True
+        for r in self.receipts:
+            if r.platform in ("reddit", "twitter", "x", "linkedin", "email", "sendgrid", "smtp") and r.verified:
+                return True
+        return False
+
+    @property
+    def verified_live_url(self) -> Optional[str]:
+        """
+        Returns the verified live URL from launch verification or deployment artifacts if live.
+        """
+        for art in self.artifacts.values():
+            if art.artifact_type in ("launch_verification", "launch_receipt") and art.status == "AVAILABLE":
+                summary = art.content_summary or {}
+                url = summary.get("live_url") or summary.get("url") or summary.get("deployment_url")
+                if url:
+                    return url
+        for art in self.artifacts.values():
+            if art.artifact_type in ("deployment_receipt", "deployment_bundle", "deployment_result") and art.status == "AVAILABLE":
+                summary = art.content_summary or {}
+                url = summary.get("url") or summary.get("live_url") or summary.get("deployment_url")
+                if url:
+                    return url
+        return None
 
     # -------------------------------------------------------------------------
     # Serialization & Deserialization

@@ -311,18 +311,34 @@ class TeamManager:
             highest_rank = max(highest_rank, overall_readiness_ranks.get(phase_readiness, 0))
 
             # Build WorkerAssignment objects
-            worker_assignments = [
-                WorkerAssignment(
-                    worker_id=w.worker_id,
-                    phase_id=pid,
-                    role=w.role,
-                    capabilities=w.capabilities,
-                    required_connectors=w.required_connectors,
-                    permissions=w.permissions,
-                    metadata={"selected_reason": "capability_match"},
+            worker_assignments = []
+            for w in selected_workers_for_phase:
+                existing_wa = phase.get_worker(w.worker_id)
+                deps = list(existing_wa.dependencies) if (existing_wa and existing_wa.dependencies) else []
+                # If this is phase_distribution and wid is a channel worker and worker_campaign is present, ensure dependency
+                if (pid == "phase_distribution" or "distribution" in pid.lower()) and w.worker_id in [
+                    "worker_reddit", "worker_x", "worker_linkedin", "worker_email"
+                ]:
+                    if any(sw.worker_id == "worker_campaign" for sw in selected_workers_for_phase):
+                        if "worker_campaign" not in deps:
+                            deps.append("worker_campaign")
+
+                wa_meta = {"selected_reason": "capability_match"}
+                if existing_wa and existing_wa.metadata:
+                    wa_meta.update(existing_wa.metadata)
+
+                worker_assignments.append(
+                    WorkerAssignment(
+                        worker_id=w.worker_id,
+                        phase_id=pid,
+                        role=w.role,
+                        capabilities=w.capabilities,
+                        required_connectors=w.required_connectors,
+                        permissions=w.permissions,
+                        dependencies=deps,
+                        metadata=wa_meta,
+                    )
                 )
-                for w in selected_workers_for_phase
-            ]
 
             phase_assignments[pid] = PhaseTeamAssignment(
                 phase_id=pid,

@@ -68,11 +68,11 @@ DEFAULT_WORKER_CONTEXT_KEYS: Dict[str, List[str]] = {
     "worker_pricing": ["idea", "target_users", "competitor_intelligence", "pricing"],
     "worker_qa_simulation": ["idea", "code_assets", "specifications", "acceptance_criteria", "simulation"],
     "worker_security": ["code_assets", "specifications", "requirements", "metadata"],
-    "worker_campaign": ["idea", "target_users", "competitor_intelligence", "pricing", "simulation"],
-    "worker_reddit": ["idea", "target_users", "distribution", "competitor_intelligence", "simulation"],
-    "worker_x": ["idea", "target_users", "distribution", "simulation"],
-    "worker_linkedin": ["idea", "target_users", "distribution", "pricing"],
-    "worker_email": ["idea", "target_users", "distribution", "pricing"],
+    "worker_campaign": ["idea", "target_users", "competitor_intelligence", "pricing", "simulation", "deployment", "launch_verification", "distribution"],
+    "worker_reddit": ["idea", "target_users", "distribution", "competitor_intelligence", "simulation", "deployment", "launch_verification"],
+    "worker_x": ["idea", "target_users", "distribution", "simulation", "deployment", "launch_verification"],
+    "worker_linkedin": ["idea", "target_users", "distribution", "pricing", "deployment", "launch_verification"],
+    "worker_email": ["idea", "target_users", "distribution", "pricing", "deployment", "launch_verification"],
     "worker_deployment": ["idea", "code_assets", "specifications", "simulation", "acceptance_criteria"],
     "worker_launch_verification": ["idea", "deployment", "receipts", "simulation", "code_assets"],
     "worker_health": ["idea", "deployment", "receipts", "definition"],
@@ -419,11 +419,21 @@ class TaskAssignmentEngine:
 
             # B. Intra-phase worker dependencies
             w_assign = phase.get_worker(wid) if phase else None
-            if w_assign and w_assign.dependencies:
-                for intra_dep_wid in w_assign.dependencies:
-                    intra_tid = phase_worker_task_lookup.get(pid, {}).get(intra_dep_wid)
-                    if intra_tid and intra_tid not in t_deps:
-                        t_deps.append(intra_tid)
+            intra_deps = list(w_assign.dependencies) if (w_assign and w_assign.dependencies) else []
+            if not intra_deps and team_plan.phase_assignments.get(pid):
+                for pwa in team_plan.phase_assignments[pid].worker_assignments:
+                    if pwa.worker_id == wid and pwa.dependencies:
+                        intra_deps = list(pwa.dependencies)
+                        break
+
+            if ("distribution" in pid.lower()) and wid in ["worker_reddit", "worker_x", "worker_linkedin", "worker_email"]:
+                if "worker_campaign" in phase_worker_task_lookup.get(pid, {}) and "worker_campaign" not in intra_deps:
+                    intra_deps.append("worker_campaign")
+
+            for intra_dep_wid in intra_deps:
+                intra_tid = phase_worker_task_lookup.get(pid, {}).get(intra_dep_wid)
+                if intra_tid and intra_tid not in t_deps:
+                    t_deps.append(intra_tid)
 
             task.dependencies = sorted(t_deps)
             task_dependencies[task.task_id] = list(task.dependencies)

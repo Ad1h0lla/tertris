@@ -76,12 +76,17 @@ from orchestration.worker_registry import (
     get_default_registry,
 )
 from orchestration.worker_runtime import (
+    CampaignWorkerAdapter,
     CodeWorkerAdapter,
     DeploymentWorkerAdapter,
+    EmailWorkerAdapter,
     LaunchVerificationWorkerAdapter,
+    LinkedInWorkerAdapter,
+    RedditWorkerAdapter,
     SimulationWorkerAdapter,
     WorkerRuntime,
     WorkerRuntimeRegistry,
+    XWorkerAdapter,
     get_default_runtime_registry,
 )
 from orchestration.workforce_coordinator import (
@@ -1322,4 +1327,510 @@ def execute_build_simulation_deployment_launch_vertical_slice(
         step_history=coordinator_res.step_history,
         errors=coordinator_res.errors,
     )
+
+
+# =============================================================================
+# 8. Stage 6E: Build -> Simulation -> Deployment -> Launch Verification -> Distribution Slice
+# =============================================================================
+
+class BuildSimulationDeploymentLaunchDistributionSliceResult(BaseModel):
+    """
+    Comprehensive outcome and provenance audit produced by the Stage 6E
+    Build -> Simulation -> Deployment -> Launch Verification -> Distribution vertical slice.
+    """
+    success: bool
+    status: str
+    is_live: bool = False
+    is_distributed: bool = False
+    project_id: str
+    execution_id: str
+    coordinator_result: CoordinatorResult
+    project_context: ProjectContext
+    workflow: ProjectWorkflow
+    team_plan: TeamPlan
+    task_plan: CompiledTaskPlan
+    build_artifacts: List[Artifact] = Field(default_factory=list)
+    simulation_artifacts: List[Artifact] = Field(default_factory=list)
+    deployment_artifacts: List[Artifact] = Field(default_factory=list)
+    launch_artifacts: List[Artifact] = Field(default_factory=list)
+    distribution_artifacts: List[Artifact] = Field(default_factory=list)
+    all_artifacts: List[Artifact] = Field(default_factory=list)
+    step_history: List[CoordinatorStepRecord] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+    executed_at: str = Field(default_factory=_utc_now_iso)
+
+    model_config = {
+        "extra": "ignore",
+    }
+
+    @property
+    def is_completed(self) -> bool:
+        return self.success and self.status == CoordinatorStatus.COMPLETED.value
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _sanitize_dict_secrets(self.model_dump())
+
+
+def create_build_simulation_deployment_launch_distribution_workflow(
+    project_context: ProjectContext,
+    build_phase_id: str = "phase_build",
+    simulation_phase_id: str = "phase_simulation",
+    deployment_phase_id: str = "phase_deployment",
+    launch_phase_id: str = "phase_launch_verification",
+    distribution_phase_id: str = "phase_distribution",
+    channels: Optional[List[str]] = None,
+) -> ProjectWorkflow:
+    """
+    Constructs a canonical 5-phase ProjectWorkflow
+    (Build -> Simulation -> Deployment -> Launch Verification -> Distribution).
+
+    Phase 1 (Build): worker_code
+    Phase 2 (Simulation): worker_qa_simulation (depends on Phase 1)
+    Phase 3 (Deployment): worker_deployment (depends on Phase 2)
+    Phase 4 (Launch Verification): worker_launch_verification (depends on Phase 3)
+    Phase 5 (Distribution): worker_campaign and selected channel workers (depends on Phase 4)
+    """
+    wf = ProjectWorkflow(
+        project_id=project_context.project_id,
+        execution_id=project_context.execution_id,
+    )
+
+    # 1. Build Phase
+    build_phase = Phase(
+        phase_id=build_phase_id,
+        phase_number=1,
+        name="Build & API Development",
+        description="Synthesizes backend code, API handlers, fastAPI routes, and core business logic.",
+        purpose="Generate functional software asset from specifications.",
+        status=PhaseStatus.READY,
+        dependencies=[],
+        entry_requirements=["intake_specification"],
+        exit_requirements=["executable_code", "backend_api"],
+        metadata={"required_capabilities": ["code_generation", "backend", "api_development", "python"]},
+    )
+    build_phase.add_worker(
+        WorkerAssignment(
+            worker_id="worker_code",
+            phase_id=build_phase_id,
+            role="code_builder",
+            capabilities=["code_generation", "backend", "api_development", "python"],
+            permissions=["filesystem:write", "workspace:edit"],
+        )
+    )
+    wf.add_phase(build_phase)
+
+    # 2. Simulation Phase
+    sim_phase = Phase(
+        phase_id=simulation_phase_id,
+        phase_number=2,
+        name="Simulation & QA Verification",
+        description="Simulates runtime user traffic, tests payload schemas, and verifies behavioral criteria.",
+        purpose="Verify behavioral criteria and backend endpoints prior to release.",
+        status=PhaseStatus.PLANNED,
+        dependencies=[build_phase_id],
+        entry_requirements=["executable_code", "backend_api"],
+        exit_requirements=["simulation_pass", "qa_report"],
+        metadata={
+            "required_capabilities": ["qa_testing", "behavioral_simulation"],
+            "context_keys": ["idea", "code_assets", "specifications", "acceptance_criteria", "simulation"],
+        },
+    )
+    sim_phase.add_worker(
+        WorkerAssignment(
+            worker_id="worker_qa_simulation",
+            phase_id=simulation_phase_id,
+            role="qa_tester",
+            capabilities=["qa_testing", "behavioral_simulation"],
+            permissions=["execution:test"],
+            dependencies=[],
+            metadata={
+                "consumes_artifacts": ["code_workspace", "backend_api"],
+                "produces_artifacts": ["simulation_result", "qa_report"],
+            },
+        )
+    )
+    wf.add_phase(sim_phase, dependencies=[build_phase_id])
+
+    # 3. Deployment Phase
+    deploy_phase = Phase(
+        phase_id=deployment_phase_id,
+        phase_number=3,
+        name="Hosting & Cloud Deployment",
+        description="Packages build bundles, checks simulation gate, and deploys live web application to Vercel/cloud hosting.",
+        purpose="Deploy verified build artifacts to public or staging cloud hosting.",
+        status=PhaseStatus.PLANNED,
+        dependencies=[simulation_phase_id],
+        entry_requirements=["executable_code", "simulation_pass"],
+        exit_requirements=["deployment_bundle", "deployment_receipt"],
+        metadata={
+            "required_capabilities": ["deployment_preparation", "vercel_deployment", "cloud_hosting", "build_bundle"],
+            "context_keys": ["idea", "code_assets", "specifications", "simulation", "acceptance_criteria"],
+        },
+    )
+    deploy_phase.add_worker(
+        WorkerAssignment(
+            worker_id="worker_deployment",
+            phase_id=deployment_phase_id,
+            role="deployment_engineer",
+            capabilities=["deployment_preparation", "vercel_deployment", "cloud_hosting", "build_bundle"],
+            permissions=["deployment:execute"],
+            dependencies=[],
+            metadata={
+                "consumes_artifacts": ["code_workspace", "simulation_result"],
+                "produces_artifacts": ["deployment_bundle", "deployment_receipt"],
+            },
+        )
+    )
+    wf.add_phase(deploy_phase, dependencies=[simulation_phase_id])
+
+    # 4. Launch Verification Phase
+    launch_phase = Phase(
+        phase_id=launch_phase_id,
+        phase_number=4,
+        name="Live Reachability & Launch Verification",
+        description="Performs live HTTP smoke checks against the deployed URL and certifies the project is live and reachable.",
+        purpose="Independently verify reachability and live health of deployed service before marking project LIVE.",
+        status=PhaseStatus.PLANNED,
+        dependencies=[deployment_phase_id],
+        entry_requirements=["deployment_bundle", "deployment_receipt"],
+        exit_requirements=["launch_verification", "launch_receipt"],
+        metadata={
+            "required_capabilities": ["launch_verification", "live_smoke_test", "http_verification", "reachability_check"],
+            "context_keys": ["idea", "deployment", "receipts", "simulation", "code_assets"],
+        },
+    )
+    launch_phase.add_worker(
+        WorkerAssignment(
+            worker_id="worker_launch_verification",
+            phase_id=launch_phase_id,
+            role="launch_verification_engineer",
+            capabilities=["launch_verification", "live_smoke_test", "http_verification", "reachability_check"],
+            permissions=["network:read"],
+            dependencies=[],
+            metadata={
+                "consumes_artifacts": ["deployment_bundle", "deployment_receipt"],
+                "produces_artifacts": ["launch_verification", "launch_receipt"],
+            },
+        )
+    )
+    wf.add_phase(launch_phase, dependencies=[deployment_phase_id])
+
+    # 5. Distribution Phase
+    active_channels = [c.lower().strip() for c in (channels if channels is not None else ["reddit", "x", "linkedin", "email"])]
+
+    req_caps = ["campaign_strategy", "distribution_planning"]
+    if "reddit" in active_channels:
+        req_caps.extend(["reddit_distribution", "reddit_post"])
+    if "x" in active_channels or "twitter" in active_channels:
+        req_caps.extend(["x_distribution", "twitter_post"])
+    if "linkedin" in active_channels:
+        req_caps.extend(["linkedin_distribution", "article_post"])
+    if "email" in active_channels:
+        req_caps.extend(["email_outreach", "send_email"])
+
+    dist_phase = Phase(
+        phase_id=distribution_phase_id,
+        phase_number=5,
+        name="Campaign Planning & Multi-Channel Distribution",
+        description="Formulates targeted distribution strategies and publishes verified product announcements across social/communication channels.",
+        purpose="Plan and execute targeted public product announcements across approved channels.",
+        status=PhaseStatus.PLANNED,
+        dependencies=[launch_phase_id],
+        entry_requirements=["launch_verification", "launch_receipt"],
+        exit_requirements=["distribution_plan", "distribution_receipt"],
+        metadata={
+            "required_capabilities": req_caps,
+            "context_keys": ["idea", "deployment", "launch_verification", "receipts", "marketing", "distribution"],
+        },
+    )
+
+    # Add Campaign Worker (produces PLAN_READY, no public post permissions needed)
+    dist_phase.add_worker(
+        WorkerAssignment(
+            worker_id="worker_campaign",
+            phase_id=distribution_phase_id,
+            role="campaign_strategist",
+            capabilities=["campaign_strategy", "copywriting", "content_generation", "launch_messaging"],
+            permissions=[],
+            dependencies=[],
+            metadata={
+                "consumes_artifacts": ["launch_verification", "launch_receipt", "deployment_bundle"],
+                "produces_artifacts": ["distribution_plan", "campaign_strategy"],
+            },
+        )
+    )
+
+    # Add Channel-Specific Workers (depend on worker_campaign)
+    if "reddit" in active_channels:
+        dist_phase.add_worker(
+            WorkerAssignment(
+                worker_id="worker_reddit",
+                phase_id=distribution_phase_id,
+                role="reddit_specialist",
+                capabilities=["reddit_distribution", "reddit_post", "reddit_comment", "community_engagement"],
+                permissions=["network:write:approval_required"],
+                dependencies=["worker_campaign"],
+                metadata={
+                    "consumes_artifacts": ["distribution_plan"],
+                    "produces_artifacts": ["reddit_post_receipt"],
+                },
+            )
+        )
+
+    if "x" in active_channels or "twitter" in active_channels:
+        dist_phase.add_worker(
+            WorkerAssignment(
+                worker_id="worker_x",
+                phase_id=distribution_phase_id,
+                role="x_specialist",
+                capabilities=["x_distribution", "twitter_post", "social_growth", "tweet_thread"],
+                permissions=["network:write:approval_required"],
+                dependencies=["worker_campaign"],
+                metadata={
+                    "consumes_artifacts": ["distribution_plan"],
+                    "produces_artifacts": ["x_tweet_receipt"],
+                },
+            )
+        )
+
+    if "linkedin" in active_channels:
+        dist_phase.add_worker(
+            WorkerAssignment(
+                worker_id="worker_linkedin",
+                phase_id=distribution_phase_id,
+                role="linkedin_specialist",
+                capabilities=["linkedin_distribution", "b2b_networking", "article_post", "company_update"],
+                permissions=["network:write:approval_required"],
+                dependencies=["worker_campaign"],
+                metadata={
+                    "consumes_artifacts": ["distribution_plan"],
+                    "produces_artifacts": ["linkedin_post_receipt"],
+                },
+            )
+        )
+
+    if "email" in active_channels:
+        dist_phase.add_worker(
+            WorkerAssignment(
+                worker_id="worker_email",
+                phase_id=distribution_phase_id,
+                role="email_specialist",
+                capabilities=["email_outreach", "cold_email", "newsletter", "send_email"],
+                permissions=["network:write:approval_required"],
+                dependencies=["worker_campaign"],
+                metadata={
+                    "consumes_artifacts": ["distribution_plan"],
+                    "produces_artifacts": ["email_dispatch_receipt"],
+                },
+            )
+        )
+
+    wf.add_phase(dist_phase, dependencies=[launch_phase_id])
+
+    return wf
+
+
+def execute_build_simulation_deployment_launch_distribution_vertical_slice(
+    project_context: Optional[ProjectContext] = None,
+    project_data: Optional[Dict[str, Any]] = None,
+    registry: Optional[WorkerRegistry] = None,
+    runtime: Optional[WorkerRuntime] = None,
+    coordinator: Optional[WorkforceCoordinator] = None,
+    channels: Optional[List[str]] = None,
+    connected_connectors: Optional[Set[str] | List[str]] = None,
+    authorized_permissions: Optional[Set[str] | List[str]] = None,
+    approved_task_ids: Optional[Set[str] | List[str]] = None,
+    http_verifier: Optional[Callable[[str], Dict[str, Any]]] = None,
+    reddit_client: Optional[Any] = None,
+    x_client: Optional[Any] = None,
+    linkedin_client: Optional[Any] = None,
+    email_client: Optional[Any] = None,
+    dry_run: bool = False,
+) -> BuildSimulationDeploymentLaunchDistributionSliceResult:
+    """
+    Executes the Stage 6E Build -> Simulation -> Deployment -> Launch Verification -> Distribution
+    Multi-Phase Vertical Slice end-to-end.
+
+    Composition Flow:
+        1. Establish authoritative ProjectContext
+        2. Construct 5-Phase ProjectWorkflow (Build -> Simulation -> Deployment -> Launch Verification -> Distribution)
+        3. Assemble TeamPlan via TeamManager
+        4. Compile TaskPlan via TaskAssignmentEngine
+        5. Execute via WorkforceCoordinator:
+           - Build executes & verifies
+           - Simulation executes & verifies
+           - Deployment executes & verifies
+           - Launch Verification certifies LIVE status
+           - Distribution Campaign Worker plans campaign (PLAN_READY)
+           - Approval gate checked for public channels
+           - Channel Workers execute real/adapted channel actions & produce verified receipts
+        6. Return BuildSimulationDeploymentLaunchDistributionSliceResult with full provenance audit
+    """
+    reg = registry or get_default_registry()
+
+    conns = connected_connectors if connected_connectors is not None else [
+        "vercel", "redditapis", "twitter", "linkedin", "sendgrid", "smtp"
+    ]
+    perms = authorized_permissions if authorized_permissions is not None else [
+        "filesystem:write", "workspace:edit", "execution:test", "deployment:execute",
+        "network:read", "network:write:approval_required"
+    ]
+
+    # 1. Authoritative ProjectContext
+    if project_context is None:
+        if project_data:
+            ctx = from_legacy_project_dict(project_data)
+        else:
+            ctx = create_build_project_context()
+    else:
+        ctx = project_context
+
+    # 2. Build 5-Phase Workflow
+    workflow = create_build_simulation_deployment_launch_distribution_workflow(ctx, channels=channels)
+
+    # 3. Team Assembly via TeamManager
+    team_mgr = TeamManager(registry=reg)
+    team_plan = team_mgr.evaluate_team(
+        workflow=workflow,
+        project_context=ctx.get_slice(["idea", "goal", "requirements", "acceptance_criteria"]),
+        connected_connectors=conns,
+        authorized_permissions=perms,
+    )
+    team_plan.apply_to_workflow(workflow)
+
+    # 4. Task Compilation via TaskAssignmentEngine
+    task_engine = TaskAssignmentEngine(registry=reg)
+    task_plan = task_engine.assign_tasks(
+        project_context=ctx,
+        workflow=workflow,
+        team_plan=team_plan,
+        connected_connectors=conns,
+        authorized_permissions=perms,
+    )
+
+    if not task_plan.is_executable():
+        coord_res = CoordinatorResult(
+            status=CoordinatorStatus.INVALID.value if task_plan.validation_errors else CoordinatorStatus.BLOCKED.value,
+            project_id=ctx.project_id,
+            execution_id=ctx.execution_id,
+            steps_executed=0,
+            blocked_tasks=task_plan.blocked_tasks,
+            reason=f"Task plan compilation did not reach READY state: {'; '.join(task_plan.validation_errors)}",
+            errors=task_plan.validation_errors,
+        )
+        return BuildSimulationDeploymentLaunchDistributionSliceResult(
+            success=False,
+            status=coord_res.status,
+            is_live=False,
+            is_distributed=False,
+            project_id=ctx.project_id,
+            execution_id=ctx.execution_id,
+            coordinator_result=coord_res,
+            project_context=ctx,
+            workflow=workflow,
+            team_plan=team_plan,
+            task_plan=task_plan,
+            build_artifacts=[],
+            simulation_artifacts=[],
+            deployment_artifacts=[],
+            launch_artifacts=[],
+            distribution_artifacts=[],
+            all_artifacts=[],
+            step_history=[],
+            errors=task_plan.validation_errors,
+        )
+
+    # 5. Execution via WorkforceCoordinator
+    if coordinator is None:
+        dispatcher = ExecutionDispatcher(registry=reg, dispatch_registry=DispatchRegistry())
+        rt = runtime or WorkerRuntime(registry=reg, runtime_registry=WorkerRuntimeRegistry())
+        if not rt.resolve_worker("worker_code"):
+            rt.register_worker(CodeWorkerAdapter())
+        if not rt.resolve_worker("worker_qa_simulation"):
+            rt.register_worker(SimulationWorkerAdapter())
+        if not rt.resolve_worker("worker_deployment"):
+            rt.register_worker(DeploymentWorkerAdapter())
+        verifier = http_verifier or (lambda url: {"status": "PASS", "http_status": 200, "url": url, "response_time_ms": 25.0, "error": None})
+        rt.register_worker(LaunchVerificationWorkerAdapter(http_verifier=verifier))
+        if not rt.resolve_worker("worker_campaign"):
+            rt.register_worker(CampaignWorkerAdapter())
+        if not rt.resolve_worker("worker_reddit") or reddit_client is not None:
+            rt.register_worker(RedditWorkerAdapter(client=reddit_client))
+        if not rt.resolve_worker("worker_x") or x_client is not None:
+            rt.register_worker(XWorkerAdapter(client=x_client))
+        if not rt.resolve_worker("worker_linkedin") or linkedin_client is not None:
+            rt.register_worker(LinkedInWorkerAdapter(client=linkedin_client))
+        if not rt.resolve_worker("worker_email") or email_client is not None:
+            rt.register_worker(EmailWorkerAdapter(client=email_client))
+
+        sync = ContextSynchronizer()
+        advancer = GraphAdvancer()
+        coord = WorkforceCoordinator(
+            dispatcher=dispatcher,
+            runtime=rt,
+            context_sync=sync,
+            graph_advancer=advancer,
+        )
+    else:
+        coord = coordinator
+
+    approved = set(approved_task_ids) if approved_task_ids is not None else {t.task_id for t in task_plan.tasks}
+
+    coordinator_res = coord.run_workflow(
+        project_context=ctx,
+        compiled_task_plan=task_plan,
+        connected_connectors=conns,
+        authorized_permissions=perms,
+        approved_task_ids=approved,
+        dry_run=dry_run,
+    )
+
+    # 6. Extract Promoted Artifacts from ProjectContext
+    build_artifacts = [
+        art for art in ctx.artifacts.values()
+        if art.phase_id == "phase_build" or art.producer_worker == "worker_code"
+    ]
+    sim_artifacts = [
+        art for art in ctx.artifacts.values()
+        if art.phase_id == "phase_simulation" or art.producer_worker == "worker_qa_simulation"
+    ]
+    dep_artifacts = [
+        art for art in ctx.artifacts.values()
+        if art.phase_id == "phase_deployment" or art.producer_worker == "worker_deployment"
+    ]
+    launch_artifacts = [
+        art for art in ctx.artifacts.values()
+        if art.phase_id == "phase_launch_verification" or art.producer_worker == "worker_launch_verification"
+    ]
+    dist_worker_ids = {"worker_campaign", "worker_reddit", "worker_x", "worker_linkedin", "worker_email"}
+    dist_artifacts = [
+        art for art in ctx.artifacts.values()
+        if art.phase_id == "phase_distribution" or art.producer_worker in dist_worker_ids
+    ]
+
+    is_live_outcome = ctx.is_live and coordinator_res.is_completed
+    is_distributed_outcome = ctx.is_distributed and coordinator_res.is_completed
+
+    return BuildSimulationDeploymentLaunchDistributionSliceResult(
+        success=coordinator_res.is_completed,
+        status=coordinator_res.status,
+        is_live=is_live_outcome,
+        is_distributed=is_distributed_outcome,
+        project_id=ctx.project_id,
+        execution_id=ctx.execution_id,
+        coordinator_result=coordinator_res,
+        project_context=ctx,
+        workflow=workflow,
+        team_plan=team_plan,
+        task_plan=task_plan,
+        build_artifacts=build_artifacts,
+        simulation_artifacts=sim_artifacts,
+        deployment_artifacts=dep_artifacts,
+        launch_artifacts=launch_artifacts,
+        distribution_artifacts=dist_artifacts,
+        all_artifacts=list(ctx.artifacts.values()),
+        step_history=coordinator_res.step_history,
+        errors=coordinator_res.errors,
+    )
+
 

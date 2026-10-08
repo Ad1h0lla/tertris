@@ -317,11 +317,11 @@ def build_default_worker_descriptors() -> List[WorkerDescriptor]:
             name="Marketing & Campaign Strategist",
             role="campaign_strategist",
             description="Produces multi-channel distribution plans, pitch copy, and targeted outreach sequences.",
-            capabilities=["campaign_strategy", "copywriting", "content_generation", "launch_messaging"],
+            capabilities=["campaign_strategy", "copywriting", "content_generation", "launch_messaging", "distribution_planning"],
             required_connectors=[],
             permissions=[],
             supported_task_types=["plan_campaign", "write_copy", "generate_distribution_plan"],
-            phase_affinity=["marketing", "distribution", "phase_3"],
+            phase_affinity=["marketing", "distribution", "phase_3", "phase_5"],
             worker_class_path="agents.specialist.campaign_agent",
         ),
         WorkerDescriptor(
