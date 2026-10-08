@@ -303,10 +303,9 @@ class ProjectContext(BaseModel):
             "code_assets": {"code_workspace", "code", "backend", "frontend", "database_schema", "backend_api"},
             "research": {"deep_research", "market_trends", "domain_research"},
             "competitor_intelligence": {"competitor_analysis", "competitor_intel", "market_research"},
-            "pricing": {"pricing_model", "pricing_strategy", "saas_tiers"},
-            "simulation": {"simulation_result", "qa_test", "smoke_test"},
+            "simulation": {"simulation_result", "qa_test", "smoke_test", "qa_report"},
             "distribution": {"distribution_plan", "campaign_strategy", "outreach_sequence"},
-            "deployment": {"deployment_bundle", "deployment_manifest", "live_service"},
+            "deployment": {"deployment_bundle", "deployment_manifest", "live_service", "deployment_receipt", "deployment_result"},
             "health": {"health_config", "uptime_monitor", "health_check"},
         }
 

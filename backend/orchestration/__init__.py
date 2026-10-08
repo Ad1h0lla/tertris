@@ -17,11 +17,14 @@ from orchestration.build_integration import (
     HEALTH_API_FIXTURE,
     BuildSliceResult,
     BuildSimulationSliceResult,
+    BuildSimulationDeploymentSliceResult,
     create_build_project_context,
     create_build_workflow,
     create_build_simulation_workflow,
+    create_build_simulation_deployment_workflow,
     execute_build_vertical_slice,
     execute_build_simulation_vertical_slice,
+    execute_build_simulation_deployment_vertical_slice,
     from_legacy_project_dict,
 )
 
@@ -38,11 +41,14 @@ __all__ = [
     "HEALTH_API_FIXTURE",
     "BuildSliceResult",
     "BuildSimulationSliceResult",
+    "BuildSimulationDeploymentSliceResult",
     "create_build_project_context",
     "create_build_workflow",
     "create_build_simulation_workflow",
+    "create_build_simulation_deployment_workflow",
     "execute_build_vertical_slice",
     "execute_build_simulation_vertical_slice",
+    "execute_build_simulation_deployment_vertical_slice",
     "from_legacy_project_dict",
 ]
 
