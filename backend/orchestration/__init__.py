@@ -18,13 +18,16 @@ from orchestration.build_integration import (
     BuildSliceResult,
     BuildSimulationSliceResult,
     BuildSimulationDeploymentSliceResult,
+    BuildSimulationDeploymentLaunchSliceResult,
     create_build_project_context,
     create_build_workflow,
     create_build_simulation_workflow,
     create_build_simulation_deployment_workflow,
+    create_build_simulation_deployment_launch_workflow,
     execute_build_vertical_slice,
     execute_build_simulation_vertical_slice,
     execute_build_simulation_deployment_vertical_slice,
+    execute_build_simulation_deployment_launch_vertical_slice,
     from_legacy_project_dict,
 )
 
@@ -42,13 +45,16 @@ __all__ = [
     "BuildSliceResult",
     "BuildSimulationSliceResult",
     "BuildSimulationDeploymentSliceResult",
+    "BuildSimulationDeploymentLaunchSliceResult",
     "create_build_project_context",
     "create_build_workflow",
     "create_build_simulation_workflow",
     "create_build_simulation_deployment_workflow",
+    "create_build_simulation_deployment_launch_workflow",
     "execute_build_vertical_slice",
     "execute_build_simulation_vertical_slice",
     "execute_build_simulation_deployment_vertical_slice",
+    "execute_build_simulation_deployment_launch_vertical_slice",
     "from_legacy_project_dict",
 ]
 

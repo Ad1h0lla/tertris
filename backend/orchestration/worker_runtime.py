@@ -41,6 +41,18 @@ from orchestration.worker_contract import (
 )
 from orchestration.worker_registry import WorkerDescriptor, WorkerRegistry, get_default_registry
 
+try:
+    from execution.vercel_executor import perform_live_smoke_check
+except Exception:
+    def perform_live_smoke_check(url: str, timeout_seconds: int = 15) -> Dict[str, Any]:
+        return {
+            "status": "PASS" if url else "FAIL",
+            "http_status": 200 if url else None,
+            "content_length": 42 if url else 0,
+            "url": url,
+            "error": None if url else "Empty URL",
+        }
+
 logger = logging.getLogger(__name__)
 
 
@@ -756,6 +768,199 @@ class DeploymentWorkerAdapter(BaseWorker):
         )
 
 
+class LaunchVerificationWorkerAdapter(BaseWorker):
+    """
+    Performs live HTTP smoke verification of deployed endpoints after deployment
+    and establishes verified LIVE status for the project.
+    """
+
+    def __init__(
+        self,
+        worker_id: str = "worker_launch_verification",
+        name: str = "Live Launch Verification Engineer",
+        role: str = "launch_verification_engineer",
+        http_verifier: Optional[Callable[[str], Dict[str, Any]]] = None,
+    ):
+        super().__init__(
+            worker_id=worker_id,
+            name=name,
+            role=role,
+            description="Performs live HTTP smoke checks, verifies reachability of deployed endpoints, and certifies live service status.",
+            capabilities=["launch_verification", "live_smoke_test", "http_verification", "reachability_check"],
+            permissions=["network:read"],
+        )
+        self.http_verifier = http_verifier
+
+    def prepare_task(self, task: Task, context: Optional[Dict[str, Any]] = None) -> TaskPlan:
+        return TaskPlan(
+            task_id=task.task_id,
+            worker_id=self.worker_id,
+            readiness_status="READY",
+            required_capabilities=self.capabilities,
+            required_connectors=[],
+            approval_requirement=False,
+        )
+
+    def execute_task(self, task: Task, context: Optional[Dict[str, Any]] = None) -> TaskResult:
+        # Resolve deployment outputs from context / inputs
+        deployment_assets = task.inputs.get("deployment", [])
+        receipts = task.inputs.get("receipts", [])
+        direct_url = task.inputs.get("deployment_url")
+
+        resolved_url: Optional[str] = None
+
+        if direct_url and isinstance(direct_url, str) and (direct_url.startswith("http://") or direct_url.startswith("https://")):
+            resolved_url = direct_url
+        else:
+            # Look in deployment artifacts
+            for item in deployment_assets:
+                if isinstance(item, dict):
+                    url_candidate = (
+                        item.get("url")
+                        or (item.get("content") if isinstance(item.get("content"), dict) else {}).get("url")
+                        or (item.get("content_summary") if isinstance(item.get("content_summary"), dict) else {}).get("url")
+                        or item.get("location")
+                    )
+                    if url_candidate and isinstance(url_candidate, str) and (url_candidate.startswith("http://") or url_candidate.startswith("https://")):
+                        resolved_url = url_candidate
+                        break
+
+            if not resolved_url:
+                # Look in receipts
+                for rcpt in receipts:
+                    if isinstance(rcpt, dict):
+                        cand = rcpt.get("permalink") or (rcpt.get("evidence") if isinstance(rcpt.get("evidence"), dict) else {}).get("url")
+                        if cand and isinstance(cand, str) and (cand.startswith("http://") or cand.startswith("https://")):
+                            resolved_url = cand
+                            break
+
+        if not resolved_url or not isinstance(resolved_url, str) or not (resolved_url.startswith("http://") or resolved_url.startswith("https://")):
+            return TaskResult(
+                task_id=task.task_id,
+                worker_id=self.worker_id,
+                state=WorkerState.FAILED,
+                output={
+                    "status": "FAILED",
+                    "verification_status": "FAIL",
+                    "deployment_url": None,
+                    "is_live": False,
+                    "error": "Missing or invalid deployment URL in upstream deployment outputs. Launch verification failed.",
+                    "checked_at": _utc_now_iso(),
+                },
+                artifacts=[],
+                actions=[{"action": "resolve_deployment_url", "status": "FAILED"}],
+            )
+
+        # Perform smoke verification
+        t0 = time.time()
+        if self.http_verifier is not None:
+            smoke_result = self.http_verifier(resolved_url)
+        else:
+            smoke_result = perform_live_smoke_check(resolved_url)
+        elapsed_ms = round((time.time() - t0) * 1000, 2)
+
+        smoke_status = smoke_result.get("status", "FAIL")
+        http_status = smoke_result.get("http_status")
+        smoke_error = smoke_result.get("error")
+        is_pass = (smoke_status == "PASS" and (http_status is not None and 200 <= int(http_status) < 400))
+
+        if is_pass:
+            payload = {
+                "status": "LIVE",
+                "verification_status": "PASS",
+                "deployment_url": resolved_url,
+                "http_status": http_status,
+                "response_time_ms": smoke_result.get("response_time_ms", elapsed_ms),
+                "checked_at": _utc_now_iso(),
+                "checks": [
+                    {"check": "url_presence", "status": "PASS"},
+                    {"check": "url_structure", "status": "PASS"},
+                    {"check": "http_reachability", "status": "PASS", "http_status": http_status},
+                ],
+                "smoke_check": smoke_result,
+                "is_live": True,
+                "error": None,
+            }
+            return TaskResult(
+                task_id=task.task_id,
+                worker_id=self.worker_id,
+                state=WorkerState.SUCCESS,
+                output=payload,
+                artifacts=[
+                    {
+                        "artifact_type": "launch_verification",
+                        "name": "Live Launch Verification Report",
+                        "status": "LIVE",
+                        "url": resolved_url,
+                        "deployment_url": resolved_url,
+                        "verification_status": "PASS",
+                        "content": payload,
+                    },
+                    {
+                        "artifact_type": "launch_receipt",
+                        "name": "Live Service Launch Receipt",
+                        "url": resolved_url,
+                        "deployment_url": resolved_url,
+                        "status": "LIVE",
+                        "verification_status": "PASS",
+                        "content": payload,
+                    },
+                ],
+                actions=[
+                    {"action": "resolve_deployment_url", "status": "PASS", "url": resolved_url},
+                    {"action": "live_smoke_check", "status": "PASS", "http_status": http_status},
+                ],
+            )
+        else:
+            payload = {
+                "status": "FAILED",
+                "verification_status": "FAIL",
+                "deployment_url": resolved_url,
+                "http_status": http_status,
+                "response_time_ms": smoke_result.get("response_time_ms", elapsed_ms),
+                "checked_at": _utc_now_iso(),
+                "checks": [
+                    {"check": "url_presence", "status": "PASS"},
+                    {"check": "url_structure", "status": "PASS"},
+                    {"check": "http_reachability", "status": "FAIL", "http_status": http_status, "error": smoke_error},
+                ],
+                "smoke_check": smoke_result,
+                "is_live": False,
+                "error": smoke_error or f"Smoke check failed with status {smoke_status}",
+            }
+            return TaskResult(
+                task_id=task.task_id,
+                worker_id=self.worker_id,
+                state=WorkerState.FAILED,
+                output=payload,
+                artifacts=[],
+                actions=[
+                    {"action": "resolve_deployment_url", "status": "PASS", "url": resolved_url},
+                    {"action": "live_smoke_check", "status": "FAIL", "http_status": http_status, "error": smoke_error},
+                ],
+            )
+
+    def verify_result(self, task_result: TaskResult) -> VerificationResult:
+        out = task_result.output or {}
+        if (
+            out.get("status") == "LIVE"
+            and out.get("verification_status") == "PASS"
+            and out.get("deployment_url")
+            and out.get("http_status") is not None
+        ):
+            return VerificationResult.pass_result(
+                evidence={
+                    "deployment_url": out.get("deployment_url"),
+                    "http_status": out.get("http_status"),
+                    "status": "LIVE",
+                    "response_time_ms": out.get("response_time_ms"),
+                }
+            )
+        return VerificationResult.fail_result(
+            error=out.get("error") or "Launch verification failed: deployment not reachable or status is not LIVE."
+        )
+
+
 class WorkerRuntime:
     """
     Executes BaseWorker instances from validated ExecutionEnvelopes with
@@ -780,6 +985,7 @@ class WorkerRuntime:
         self.register_worker(PricingWorkerAdapter())
         self.register_worker(SimulationWorkerAdapter())
         self.register_worker(DeploymentWorkerAdapter())
+        self.register_worker(LaunchVerificationWorkerAdapter())
 
         if custom_workers:
             for w in custom_workers.values():

@@ -74,6 +74,7 @@ DEFAULT_WORKER_CONTEXT_KEYS: Dict[str, List[str]] = {
     "worker_linkedin": ["idea", "target_users", "distribution", "pricing"],
     "worker_email": ["idea", "target_users", "distribution", "pricing"],
     "worker_deployment": ["idea", "code_assets", "specifications", "simulation", "acceptance_criteria"],
+    "worker_launch_verification": ["idea", "deployment", "receipts", "simulation", "code_assets"],
     "worker_health": ["idea", "deployment", "receipts", "definition"],
 }
 
@@ -134,6 +135,10 @@ DEFAULT_WORKER_ARTIFACT_MAP: Dict[str, Dict[str, List[str]]] = {
     "worker_deployment": {
         "consumes": ["code_workspace", "simulation_result"],
         "produces": ["deployment_bundle", "deployment_receipt"],
+    },
+    "worker_launch_verification": {
+        "consumes": ["deployment_bundle", "deployment_receipt"],
+        "produces": ["launch_verification", "launch_receipt"],
     },
     "worker_health": {
         "consumes": ["deployment_bundle", "live_service"],
@@ -606,6 +611,7 @@ class TaskAssignmentEngine:
             "worker_linkedin": f"Publish professional B2B outreach and founder updates on LinkedIn for '{idea}'.",
             "worker_email": f"Execute targeted email outreach campaigns and beta invitations for '{idea}'.",
             "worker_deployment": f"Package production build bundle and deploy live hosting service for '{idea}'.",
+            "worker_launch_verification": f"Verify live reachability and perform HTTP smoke checks on deployed service for '{idea}'.",
             "worker_health": f"Configure and verify operational health monitoring, uptime checks, and endpoint reliability for '{idea}'.",
         }
 
@@ -642,8 +648,8 @@ class TaskAssignmentEngine:
         if worker_id in broad_eval_workers:
             return all_criteria
 
-        # Deployment workers bind to criteria mentioning loading, live, dashboard, or alerts
-        if worker_id in ("worker_deployment", "worker_health"):
+        # Deployment and launch workers bind to criteria mentioning loading, live, dashboard, or alerts
+        if worker_id in ("worker_deployment", "worker_launch_verification", "worker_health"):
             deploy_matches = [
                 c for c in all_criteria
                 if any(kw in c.lower() for kw in ["load", "deploy", "live", "dashboard", "alert", "trigger", "access"])

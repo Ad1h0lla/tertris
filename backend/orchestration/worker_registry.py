@@ -84,6 +84,8 @@ WORKER_ALIASES: Dict[str, str] = {
     "worker_qa": "worker_qa_simulation",
     "worker_sec": "worker_security",
     "worker_deploy": "worker_deployment",
+    "worker_launch": "worker_launch_verification",
+    "worker_launch_verify": "worker_launch_verification",
 }
 
 
@@ -383,6 +385,18 @@ def build_default_worker_descriptors() -> List[WorkerDescriptor]:
             supported_task_types=["prepare_deployment", "deploy_vercel", "build_production"],
             phase_affinity=["deployment", "launch", "phase_4"],
             worker_class_path="execution.vercel_executor",
+        ),
+        WorkerDescriptor(
+            worker_id="worker_launch_verification",
+            name="Live Launch Verification & Reachability Engineer",
+            role="launch_verification_engineer",
+            description="Performs live HTTP smoke checks, verifies reachability of deployed endpoints, and certifies live service status.",
+            capabilities=["launch_verification", "live_smoke_test", "http_verification", "reachability_check"],
+            required_connectors=[],
+            permissions=["network:read"],
+            supported_task_types=["verify_launch", "smoke_test_endpoint", "check_live_reachability"],
+            phase_affinity=["launch_verification", "launch", "operate", "phase_4", "phase_5"],
+            worker_class_path="orchestration.worker_runtime",
         ),
         WorkerDescriptor(
             worker_id="worker_health",

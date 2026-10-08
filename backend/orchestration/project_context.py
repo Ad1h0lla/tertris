@@ -305,7 +305,9 @@ class ProjectContext(BaseModel):
             "competitor_intelligence": {"competitor_analysis", "competitor_intel", "market_research"},
             "simulation": {"simulation_result", "qa_test", "smoke_test", "qa_report"},
             "distribution": {"distribution_plan", "campaign_strategy", "outreach_sequence"},
-            "deployment": {"deployment_bundle", "deployment_manifest", "live_service", "deployment_receipt", "deployment_result"},
+            "deployment": {"deployment_bundle", "deployment_manifest", "live_service", "deployment_receipt", "deployment_result", "deployment_url"},
+            "launch_verification": {"launch_verification", "launch_receipt", "launch_report", "live_verification", "smoke_check"},
+            "launch": {"launch_verification", "launch_receipt", "launch_report", "live_verification", "smoke_check"},
             "health": {"health_config", "uptime_monitor", "health_check"},
         }
 
@@ -432,6 +434,23 @@ class ProjectContext(BaseModel):
         """Sets a project-level metadata entry after secret sanitization."""
         self.metadata[key] = _sanitize_dict_secrets(value)
         self.updated_at = _utc_now_iso()
+
+    @property
+    def is_live(self) -> bool:
+        """
+        Returns True only if verified launch verification passed and live status is established.
+        """
+        if self.metadata.get("is_live") is True:
+            return True
+        for art in self.artifacts.values():
+            if art.artifact_type in ("launch_verification", "launch_receipt") and art.status == "AVAILABLE":
+                summary = art.content_summary or {}
+                if summary.get("status") == "LIVE" or summary.get("is_live") is True or art.metadata.get("verification_status") == "PASS":
+                    return True
+        phase_ref = self.phase_history.get("phase_launch_verification")
+        if phase_ref and phase_ref.status == "COMPLETED" and phase_ref.verification_status == "PASS":
+            return True
+        return False
 
     # -------------------------------------------------------------------------
     # Serialization & Deserialization
