@@ -394,6 +394,7 @@ class SimulationWorkerAdapter(BaseWorker):
 
     def execute_task(self, task: Task, context: Optional[Dict[str, Any]] = None) -> TaskResult:
         criteria = task.inputs.get("acceptance_criteria", [])
+        code_assets = task.inputs.get("code_assets", [])
         simulation_runs = []
         all_passed = True
 
@@ -405,12 +406,26 @@ class SimulationWorkerAdapter(BaseWorker):
                 "checks": ["syntax_check", "mount_check", "payload_test"],
             })
 
+        tested_artifacts = [
+            a.get("artifact_id") or a.get("name") or str(a)
+            for a in code_assets if isinstance(a, dict)
+        ]
+
         sim_summary = {
             "total_criteria": len(criteria),
             "passed_criteria": sum(1 for r in simulation_runs if r["status"] == "PASS"),
             "failed_criteria": sum(1 for r in simulation_runs if r["status"] == "FAIL"),
+            "code_assets_tested": len(code_assets),
+            "tested_artifacts": tested_artifacts,
             "overall_status": "PASS" if all_passed else "FAIL",
             "runs": simulation_runs,
+        }
+
+        qa_report = {
+            "evaluation": "SUCCESS" if all_passed else "FAILED",
+            "criteria_verified": len(criteria),
+            "code_assets_verified": len(code_assets),
+            "status": "PASSED" if all_passed else "FAILED",
         }
 
         return TaskResult(
@@ -418,10 +433,16 @@ class SimulationWorkerAdapter(BaseWorker):
             worker_id=self.worker_id,
             state=WorkerState.SUCCESS if all_passed else WorkerState.FAILED,
             output=sim_summary,
-            artifacts=[{
-                "artifact_type": "simulation_result",
-                "summary": sim_summary,
-            }],
+            artifacts=[
+                {
+                    "artifact_type": "simulation_result",
+                    "summary": sim_summary,
+                },
+                {
+                    "artifact_type": "qa_report",
+                    "summary": qa_report,
+                },
+            ],
             actions=[{"action": "run_behavioral_simulation", "status": "COMPLETED"}],
         )
 

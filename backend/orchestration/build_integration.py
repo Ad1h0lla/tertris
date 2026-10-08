@@ -77,6 +77,7 @@ from orchestration.worker_registry import (
 )
 from orchestration.worker_runtime import (
     CodeWorkerAdapter,
+    SimulationWorkerAdapter,
     WorkerRuntime,
     WorkerRuntimeRegistry,
     get_default_runtime_registry,
@@ -404,6 +405,256 @@ def execute_build_vertical_slice(
         team_plan=team_plan,
         task_plan=task_plan,
         artifacts=produced_artifacts,
+        step_history=coordinator_res.step_history,
+        errors=coordinator_res.errors,
+    )
+
+
+# =============================================================================
+# 5. Stage 6B: Build -> Simulation Multi-Phase Vertical Slice
+# =============================================================================
+
+class BuildSimulationSliceResult(BaseModel):
+    """
+    Comprehensive outcome and provenance audit produced by the Stage 6B Build -> Simulation vertical slice.
+    """
+    success: bool
+    status: str
+    project_id: str
+    execution_id: str
+    coordinator_result: CoordinatorResult
+    project_context: ProjectContext
+    workflow: ProjectWorkflow
+    team_plan: TeamPlan
+    task_plan: CompiledTaskPlan
+    build_artifacts: List[Artifact] = Field(default_factory=list)
+    simulation_artifacts: List[Artifact] = Field(default_factory=list)
+    all_artifacts: List[Artifact] = Field(default_factory=list)
+    step_history: List[CoordinatorStepRecord] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+    executed_at: str = Field(default_factory=_utc_now_iso)
+
+    model_config = {
+        "extra": "ignore",
+    }
+
+    @property
+    def is_completed(self) -> bool:
+        return self.success and self.status == CoordinatorStatus.COMPLETED.value
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _sanitize_dict_secrets(self.model_dump())
+
+
+def create_build_simulation_workflow(
+    project_context: ProjectContext,
+    build_phase_id: str = "phase_build",
+    simulation_phase_id: str = "phase_simulation",
+) -> ProjectWorkflow:
+    """
+    Constructs a canonical 2-phase ProjectWorkflow (Build -> Simulation).
+    Phase 1 (Build): worker_code
+    Phase 2 (Simulation): worker_qa_simulation (depends on Phase 1)
+    """
+    wf = ProjectWorkflow(
+        project_id=project_context.project_id,
+        execution_id=project_context.execution_id,
+    )
+
+    # 1. Build Phase
+    build_phase = Phase(
+        phase_id=build_phase_id,
+        phase_number=1,
+        name="Build & API Development",
+        description="Synthesizes backend code, API handlers, fastAPI routes, and core business logic.",
+        purpose="Generate functional software asset from specifications.",
+        status=PhaseStatus.READY,
+        dependencies=[],
+        entry_requirements=["intake_specification"],
+        exit_requirements=["executable_code", "backend_api"],
+        metadata={"required_capabilities": ["code_generation", "backend", "api_development", "python"]},
+    )
+    build_phase.add_worker(
+        WorkerAssignment(
+            worker_id="worker_code",
+            phase_id=build_phase_id,
+            role="code_builder",
+            capabilities=["code_generation", "backend", "api_development", "python"],
+            permissions=["filesystem:write", "workspace:edit"],
+        )
+    )
+    wf.add_phase(build_phase)
+
+    # 2. Simulation Phase
+    sim_phase = Phase(
+        phase_id=simulation_phase_id,
+        phase_number=2,
+        name="Simulation & QA Verification",
+        description="Simulates runtime user traffic, tests payload schemas, and verifies behavioral criteria.",
+        purpose="Verify behavioral criteria and backend endpoints prior to release.",
+        status=PhaseStatus.PLANNED,
+        dependencies=[build_phase_id],
+        entry_requirements=["executable_code", "backend_api"],
+        exit_requirements=["simulation_pass", "qa_report"],
+        metadata={
+            "required_capabilities": ["qa_testing", "behavioral_simulation"],
+            "context_keys": ["idea", "code_assets", "specifications", "acceptance_criteria", "simulation"],
+        },
+    )
+    sim_phase.add_worker(
+        WorkerAssignment(
+            worker_id="worker_qa_simulation",
+            phase_id=simulation_phase_id,
+            role="qa_tester",
+            capabilities=["qa_testing", "behavioral_simulation"],
+            permissions=["execution:test"],
+            dependencies=[],
+            metadata={
+                "consumes_artifacts": ["code_workspace", "backend_api"],
+                "produces_artifacts": ["simulation_result", "qa_report"],
+            },
+        )
+    )
+    wf.add_phase(sim_phase, dependencies=[build_phase_id])
+
+    return wf
+
+
+def execute_build_simulation_vertical_slice(
+    project_context: Optional[ProjectContext] = None,
+    project_data: Optional[Dict[str, Any]] = None,
+    registry: Optional[WorkerRegistry] = None,
+    runtime: Optional[WorkerRuntime] = None,
+    coordinator: Optional[WorkforceCoordinator] = None,
+    connected_connectors: Optional[Set[str] | List[str]] = None,
+    authorized_permissions: Optional[Set[str] | List[str]] = None,
+    dry_run: bool = False,
+) -> BuildSimulationSliceResult:
+    """
+    Executes the Stage 6B Build -> Simulation Multi-Phase Vertical Slice end-to-end.
+
+    Composition Flow:
+        1. Establish authoritative ProjectContext
+        2. Construct 2-Phase ProjectWorkflow (Build -> Simulation)
+        3. Assemble TeamPlan via TeamManager (resolving worker_code and worker_qa_simulation)
+        4. Compile TaskPlan via TaskAssignmentEngine (task_build_code READY, task_simulation_qa_simulation WAITING)
+        5. Execute via WorkforceCoordinator:
+           - Task A (Build) executes, verifies, and promotes build artifacts to ProjectContext
+           - GraphAdvancer unlocks Task B (Simulation)
+           - Task B (Simulation) executes consuming Build artifacts, verifies, and promotes simulation artifacts
+        6. Return BuildSimulationSliceResult with full provenance audit across both phases
+    """
+    reg = registry or get_default_registry()
+
+    # 1. Authoritative ProjectContext
+    if project_context is None:
+        if project_data:
+            ctx = from_legacy_project_dict(project_data)
+        else:
+            ctx = create_build_project_context()
+    else:
+        ctx = project_context
+
+    # 2. Build 2-Phase Workflow
+    workflow = create_build_simulation_workflow(ctx)
+
+    # 3. Team Assembly via TeamManager
+    team_mgr = TeamManager(registry=reg)
+    team_plan = team_mgr.evaluate_team(
+        workflow=workflow,
+        project_context=ctx.get_slice(["idea", "goal", "requirements", "acceptance_criteria"]),
+        connected_connectors=connected_connectors,
+        authorized_permissions=authorized_permissions,
+    )
+    team_plan.apply_to_workflow(workflow)
+
+    # 4. Task Compilation via TaskAssignmentEngine
+    task_engine = TaskAssignmentEngine(registry=reg)
+    task_plan = task_engine.assign_tasks(
+        project_context=ctx,
+        workflow=workflow,
+        team_plan=team_plan,
+        connected_connectors=connected_connectors,
+        authorized_permissions=authorized_permissions,
+    )
+
+    if not task_plan.is_executable():
+        coord_res = CoordinatorResult(
+            status=CoordinatorStatus.INVALID.value if task_plan.validation_errors else CoordinatorStatus.BLOCKED.value,
+            project_id=ctx.project_id,
+            execution_id=ctx.execution_id,
+            steps_executed=0,
+            blocked_tasks=task_plan.blocked_tasks,
+            reason=f"Task plan compilation did not reach READY state: {'; '.join(task_plan.validation_errors)}",
+            errors=task_plan.validation_errors,
+        )
+        return BuildSimulationSliceResult(
+            success=False,
+            status=coord_res.status,
+            project_id=ctx.project_id,
+            execution_id=ctx.execution_id,
+            coordinator_result=coord_res,
+            project_context=ctx,
+            workflow=workflow,
+            team_plan=team_plan,
+            task_plan=task_plan,
+            build_artifacts=[],
+            simulation_artifacts=[],
+            all_artifacts=[],
+            step_history=[],
+            errors=task_plan.validation_errors,
+        )
+
+    # 5. Execution via WorkforceCoordinator
+    if coordinator is None:
+        dispatcher = ExecutionDispatcher(registry=reg, dispatch_registry=DispatchRegistry())
+        rt = runtime or WorkerRuntime(registry=reg, runtime_registry=WorkerRuntimeRegistry())
+        if not rt.resolve_worker("worker_code"):
+            rt.register_worker(CodeWorkerAdapter())
+        if not rt.resolve_worker("worker_qa_simulation"):
+            rt.register_worker(SimulationWorkerAdapter())
+        sync = ContextSynchronizer()
+        advancer = GraphAdvancer()
+        coord = WorkforceCoordinator(
+            dispatcher=dispatcher,
+            runtime=rt,
+            context_sync=sync,
+            graph_advancer=advancer,
+        )
+    else:
+        coord = coordinator
+
+    coordinator_res = coord.run_workflow(
+        project_context=ctx,
+        compiled_task_plan=task_plan,
+        connected_connectors=connected_connectors,
+        authorized_permissions=authorized_permissions,
+        dry_run=dry_run,
+    )
+
+    # 6. Extract Promoted Artifacts from ProjectContext
+    build_artifacts = [
+        art for art in ctx.artifacts.values()
+        if art.phase_id == "phase_build" or art.producer_worker == "worker_code"
+    ]
+    sim_artifacts = [
+        art for art in ctx.artifacts.values()
+        if art.phase_id == "phase_simulation" or art.producer_worker == "worker_qa_simulation"
+    ]
+
+    return BuildSimulationSliceResult(
+        success=coordinator_res.is_completed,
+        status=coordinator_res.status,
+        project_id=ctx.project_id,
+        execution_id=ctx.execution_id,
+        coordinator_result=coordinator_res,
+        project_context=ctx,
+        workflow=workflow,
+        team_plan=team_plan,
+        task_plan=task_plan,
+        build_artifacts=build_artifacts,
+        simulation_artifacts=sim_artifacts,
+        all_artifacts=list(ctx.artifacts.values()),
         step_history=coordinator_res.step_history,
         errors=coordinator_res.errors,
     )

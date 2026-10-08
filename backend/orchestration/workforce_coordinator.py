@@ -351,6 +351,20 @@ class WorkforceCoordinator:
             phase_id = current_task.metadata.get("phase_id", "phase_default")
             is_task_approved = tid in approved_tasks
 
+            # Dynamic Context Refresh from authoritative ProjectContext
+            if project_context:
+                req_keys = current_task.metadata.get("context_keys")
+                if not req_keys:
+                    from orchestration.task_assignment import DEFAULT_WORKER_CONTEXT_KEYS
+                    req_keys = list(DEFAULT_WORKER_CONTEXT_KEYS.get(
+                        wid,
+                        ["idea", "goal", "requirements", "acceptance_criteria"],
+                    ))
+                refreshed_slice = project_context.get_slice(req_keys)
+                merged_inputs = dict(current_task.inputs)
+                merged_inputs.update(refreshed_slice)
+                current_task.inputs = _sanitize_dict_secrets(merged_inputs)
+
             # --- Stage 5A: Dispatch ---
             dispatch_res: DispatchResult = self.dispatcher.dispatch_task(
                 task=current_task,

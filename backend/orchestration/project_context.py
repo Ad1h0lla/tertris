@@ -300,7 +300,7 @@ class ProjectContext(BaseModel):
         # Artifact categories mapping
         artifact_category_aliases = {
             "specifications": {"specification", "spec", "specs", "schema"},
-            "code_assets": {"code_workspace", "code", "backend", "frontend", "database_schema"},
+            "code_assets": {"code_workspace", "code", "backend", "frontend", "database_schema", "backend_api"},
             "research": {"deep_research", "market_trends", "domain_research"},
             "competitor_intelligence": {"competitor_analysis", "competitor_intel", "market_research"},
             "pricing": {"pricing_model", "pricing_strategy", "saas_tiers"},
