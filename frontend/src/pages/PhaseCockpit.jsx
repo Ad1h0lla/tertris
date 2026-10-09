@@ -610,6 +610,7 @@ export default function PhaseCockpit() {
   const [showPreviewModal, setShowPreviewModal]   = useState(false);
   const [revisionFeedback, setRevisionFeedback] = useState('');
   const [errorMessage, setErrorMessage]       = useState(null);
+  const [workforceStatus, setWorkforceStatus] = useState(null);
 
   const phaseNum = parseInt(phaseId) || 1;
   // URL route parameter takes precedence over potentially stale store state
@@ -635,6 +636,14 @@ export default function PhaseCockpit() {
         .then((res) => {
           if (res && res.workflow) {
             syncExecutionState(res);
+          }
+        })
+        .catch(() => {});
+
+      api.getWorkforceStatus(realExecutionId)
+        .then((wf) => {
+          if (wf) {
+            setWorkforceStatus(wf);
           }
         })
         .catch(() => {});
@@ -679,6 +688,58 @@ export default function PhaseCockpit() {
         feedbackText ? `Initializing Revision with Feedback: "${feedbackText}"` : `Initializing Specialist Agent: ${agent.name}...`,
       ],
     });
+
+    // Deliberate Phase 1 Workforce Execution Path (Stage 7B)
+    if (phaseNum === 1 && realExecutionId) {
+      try {
+        addAgentLog(agent.id, `Dispatching Phase 1 (Build) to canonical Workforce Coordinator...`);
+        const wfRes = await api.executeWorkforce({
+          executionId: realExecutionId,
+          phaseId: 'phase_build',
+          workflowType: 'build',
+        });
+
+        (wfRes.completed_tasks || []).forEach((tid) => {
+          addAgentLog(agent.id, `✓ Task Verified & Passed: ${tid}`);
+        });
+        (wfRes.failed_tasks || []).forEach((tid) => {
+          addAgentLog(agent.id, `✗ Task Failed: ${tid}`);
+        });
+        (wfRes.artifacts || []).forEach((art) => {
+          addAgentLog(agent.id, `📦 Artifact Delivered: ${art.name} (${art.artifact_type}) — Status: ${art.status}`);
+        });
+
+        const isSuccess = wfRes.success || wfRes.coordinator_status === 'COMPLETED';
+        const filesWritten = (wfRes.artifacts || []).map((a) => a.location || a.name).filter(Boolean);
+
+        updateAgent(agent.id, {
+          status: isSuccess ? 'completed' : 'failed',
+          output: wfRes.reason || `# Workforce Build Execution ${isSuccess ? 'Completed' : 'Failed'}\n\nTasks Executed: ${(wfRes.completed_tasks || []).length}\nDeliverables: ${(wfRes.artifacts || []).length}`,
+          files_written: filesWritten,
+        });
+
+        updatePhase(phaseNum, {
+          status: isSuccess ? 'WAITING_FOR_APPROVAL' : 'FAILED',
+          outcome: wfRes.reason || `# Workforce Build Phase ${isSuccess ? 'Success' : 'Failed'}`,
+          files_written: filesWritten,
+        });
+
+        const updatedWf = await api.getWorkforceStatus(realExecutionId);
+        if (updatedWf) setWorkforceStatus(updatedWf);
+      } catch (err) {
+        const errorText = err instanceof ApiError
+          ? `HTTP ${err.status} on ${err.endpoint} — ${err.detail}`
+          : `Workforce Execution error: ${err.message || String(err)}`;
+
+        setErrorMessage(errorText);
+        updateAgent(agent.id, { status: 'failed', output: errorText });
+        addAgentLog(agent.id, errorText);
+        updatePhase(phaseNum, { status: 'FAILED' });
+      } finally {
+        setIsRunning(false);
+      }
+      return;
+    }
 
     const previousOutput = Object.keys(phases)
       .filter((p) => parseInt(p) < phaseNum)
@@ -871,6 +932,67 @@ export default function PhaseCockpit() {
               </div>
             );
           })}
+
+          {/* Workforce Verified Deliverables & Tasks (Stage 7B) */}
+          {workforceStatus && (workforceStatus.artifacts?.length > 0 || workforceStatus.tasks?.length > 0) && (
+            <div style={{
+              padding: '16px',
+              background: 'var(--surface)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '10px',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: '11px', color: 'var(--text-4)', fontWeight: '700' }}>
+                  🏢 WORKFORCE DELIVERABLES & VERIFICATION ({workforceStatus.artifacts?.length || 0})
+                </div>
+                <span style={{
+                  fontSize: '10px',
+                  fontFamily: 'var(--mono)',
+                  color: workforceStatus.status === 'completed' ? 'var(--green)' : 'var(--blue)',
+                  background: 'rgba(56, 189, 248, 0.1)',
+                  padding: '2px 6px',
+                  borderRadius: '4px',
+                }}>
+                  {workforceStatus.coordinator_status || workforceStatus.status?.toUpperCase()}
+                </span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {workforceStatus.artifacts?.map((art, idx) => (
+                  <div key={idx} style={{
+                    padding: '8px 10px',
+                    background: 'var(--bg)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '4px',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}>
+                    <div>
+                      <div style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text)' }}>
+                        {art.name}
+                      </div>
+                      <div style={{ fontSize: '10px', color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: '2px' }}>
+                        {art.artifact_type} • Worker: {art.producer_worker}
+                      </div>
+                    </div>
+                    <span style={{
+                      fontSize: '10px',
+                      fontFamily: 'var(--mono)',
+                      padding: '2px 6px',
+                      borderRadius: '4px',
+                      color: 'var(--green)',
+                      background: 'rgba(34, 197, 94, 0.12)',
+                    }}>
+                      ✓ {art.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Generated Artifacts List */}
           {currentFiles.length > 0 && (

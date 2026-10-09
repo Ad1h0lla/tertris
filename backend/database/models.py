@@ -347,6 +347,305 @@ class DistributionCampaign(Base):
     )
 
 
+class WorkforceTask(Base):
+    __tablename__ = "workforce_tasks"
+
+    id = Column(
+        String,
+        primary_key=True
+    )
+
+    execution_id = Column(
+        String,
+        index=True
+    )
+
+    project_id = Column(
+        String,
+        index=True,
+        nullable=True
+    )
+
+    task_id = Column(
+        String,
+        index=True
+    )
+
+    phase_id = Column(
+        String
+    )
+
+    worker_id = Column(
+        String
+    )
+
+    status = Column(
+        String,
+        default="PLANNED"
+    )
+
+    verification_status = Column(
+        String,
+        nullable=True
+    )
+
+    inputs = Column(
+        JSON,
+        nullable=True
+    )
+
+    result = Column(
+        JSON,
+        nullable=True
+    )
+
+    requires_approval = Column(
+        Boolean,
+        default=False
+    )
+
+    is_approved = Column(
+        Boolean,
+        default=False
+    )
+
+    approved_at = Column(
+        DateTime,
+        nullable=True
+    )
+
+    approved_by = Column(
+        String,
+        nullable=True
+    )
+
+    error_message = Column(
+        Text,
+        nullable=True
+    )
+
+    started_at = Column(
+        DateTime,
+        nullable=True
+    )
+
+    completed_at = Column(
+        DateTime,
+        nullable=True
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow
+    )
+
+
+class ProjectArtifact(Base):
+    __tablename__ = "project_artifacts"
+
+    id = Column(
+        String,
+        primary_key=True
+    )
+
+    execution_id = Column(
+        String,
+        index=True
+    )
+
+    project_id = Column(
+        String,
+        index=True,
+        nullable=True
+    )
+
+    name = Column(
+        String
+    )
+
+    artifact_type = Column(
+        String,
+        index=True
+    )
+
+    phase_id = Column(
+        String
+    )
+
+    producer_worker = Column(
+        String
+    )
+
+    producer_task = Column(
+        String,
+        nullable=True
+    )
+
+    status = Column(
+        String,
+        default="AVAILABLE"
+    )
+
+    location = Column(
+        String,
+        default=""
+    )
+
+    content_summary = Column(
+        JSON,
+        nullable=True
+    )
+
+    metadata_dict = Column(
+        JSON,
+        nullable=True
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow
+    )
+
+
+class WorkforceStep(Base):
+    __tablename__ = "workforce_steps"
+
+    id = Column(
+        String,
+        primary_key=True
+    )
+
+    execution_id = Column(
+        String,
+        index=True
+    )
+
+    step_number = Column(
+        Integer
+    )
+
+    task_id = Column(
+        String
+    )
+
+    worker_id = Column(
+        String
+    )
+
+    phase_id = Column(
+        String
+    )
+
+    dispatch_status = Column(
+        String
+    )
+
+    runtime_status = Column(
+        String,
+        nullable=True
+    )
+
+    verification_status = Column(
+        String,
+        nullable=True
+    )
+
+    sync_status = Column(
+        String,
+        nullable=True
+    )
+
+    artifacts_produced = Column(
+        JSON,
+        nullable=True
+    )
+
+    receipts_produced = Column(
+        JSON,
+        nullable=True
+    )
+
+    newly_ready_tasks = Column(
+        JSON,
+        nullable=True
+    )
+
+    error = Column(
+        Text,
+        nullable=True
+    )
+
+    executed_at = Column(
+        DateTime,
+        default=datetime.utcnow
+    )
+
+
+class HealthReportRecord(Base):
+    __tablename__ = "health_reports"
+
+    id = Column(
+        String,
+        primary_key=True
+    )
+
+    execution_id = Column(
+        String,
+        index=True
+    )
+
+    project_id = Column(
+        String,
+        index=True,
+        nullable=True
+    )
+
+    status = Column(
+        String
+    )
+
+    assessed_url = Column(
+        String,
+        nullable=True
+    )
+
+    observations = Column(
+        JSON,
+        nullable=True
+    )
+
+    findings = Column(
+        JSON,
+        nullable=True
+    )
+
+    unavailable_signals = Column(
+        JSON,
+        nullable=True
+    )
+
+    recommendations = Column(
+        JSON,
+        nullable=True
+    )
+
+    provenance = Column(
+        JSON,
+        nullable=True
+    )
+
+    assessed_at = Column(
+        DateTime,
+        default=datetime.utcnow
+    )
+
+
 def init_db():
     """Create all tables on startup and apply missing column migrations."""
     Base.metadata.create_all(
@@ -370,6 +669,7 @@ def init_db():
             "ALTER TABLE phase_results ADD COLUMN distribution_plan JSON;",
             "ALTER TABLE phase_results ADD COLUMN error_message TEXT;",
             "ALTER TABLE executions ADD COLUMN phase_names JSON;",
+            "ALTER TABLE executions ADD COLUMN workforce_status VARCHAR;",
         ]:
             try:
                 conn.execute(text(stmt))
@@ -386,3 +686,4 @@ def get_db():
         yield db
     finally:
         db.close()
+

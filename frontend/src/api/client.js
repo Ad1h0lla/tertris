@@ -297,6 +297,42 @@ class ApiClient {
       action_ids: actionIds,
     });
   }
+
+  // ─── Workforce Engine (Stage 7B) ─────────────────────────────────────────────
+
+  async executeWorkforce({ executionId, phaseId = null, workflowType = null, userId = 'user_001', approvedTaskIds = null, dryRun = false }) {
+    return this.request('/api/workforce/execute', 'POST', {
+      execution_id: executionId,
+      phase_id: phaseId,
+      workflow_type: workflowType,
+      user_id: userId,
+      approved_task_ids: approvedTaskIds,
+      dry_run: dryRun,
+    });
+  }
+
+  async getWorkforceStatus(executionId) {
+    return this.request(`/api/workforce/${executionId}/status`, 'GET');
+  }
+
+  async approveWorkforceTask(executionId, taskId, feedback = null, userId = 'user_001') {
+    return this.request(`/api/workforce/${executionId}/tasks/${taskId}/approve`, 'POST', {
+      user_id: userId,
+      feedback: feedback,
+    });
+  }
+
+  async getWorkforceHealth(executionId) {
+    return this.request(`/api/workforce/${executionId}/health`, 'GET');
+  }
+
+  async assessWorkforceHealth(executionId, targetUrl = null, responseTimeThresholdMs = 500.0, userId = 'user_001') {
+    return this.request(`/api/workforce/${executionId}/health`, 'POST', {
+      user_id: userId,
+      target_url: targetUrl,
+      response_time_threshold_ms: responseTimeThresholdMs,
+    });
+  }
 }
 
 export const api = new ApiClient();

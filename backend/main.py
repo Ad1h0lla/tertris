@@ -850,6 +850,16 @@ from routes.distribution import router as _distribution_router
 app.include_router(_distribution_router)
 print('[main.py] Mounted M3.5-B distribution router at /distribution')
 
+# Stage 7B: Mount additive Workforce API router at /api/workforce
+from routes.workforce import router as _workforce_router
+app.include_router(_workforce_router)
+print('[main.py] Mounted Stage 7B Workforce router at /api/workforce')
+
+# Stage 7B: Mount dedicated Health router at /health
+from routes.health import router as _health_router
+app.include_router(_health_router)
+print('[main.py] Mounted Stage 7B Health router at /health')
+
 _PATHS_TO_FIX = {'/intake', '/intake/reply', '/execute', '/execute/agent', '/approve', '/next-phase', '/execute/distribution-action', '/execute/action'}
 _FIXED_HANDLERS = {
     '/intake':                      _intake_fixed,

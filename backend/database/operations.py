@@ -6,6 +6,10 @@ from database.models import (
     PhaseResult,
     ScheduledJob,
     StoredCredential,
+    WorkforceTask,
+    ProjectArtifact,
+    WorkforceStep,
+    HealthReportRecord,
 )
 
 
@@ -478,4 +482,297 @@ def get_distribution_campaign_by_execution(db, execution_id: str):
         .order_by(DistributionCampaign.created_at.desc())
         .first()
     )
+
+
+# =============================================================================
+# Workforce Persistence Operations
+# =============================================================================
+
+def save_or_update_workforce_task(
+    db,
+    execution_id: str,
+    task_id: str,
+    phase_id: str,
+    worker_id: str,
+    status: str,
+    project_id: str = None,
+    verification_status: str = None,
+    inputs: dict = None,
+    result: dict = None,
+    requires_approval: bool = False,
+    is_approved: bool = False,
+    approved_at: datetime = None,
+    approved_by: str = None,
+    error_message: str = None,
+    started_at: datetime = None,
+    completed_at: datetime = None,
+):
+    from sqlalchemy.orm.attributes import flag_modified
+    import copy
+
+    existing = (
+        db.query(WorkforceTask)
+        .filter(WorkforceTask.execution_id == execution_id, WorkforceTask.task_id == task_id)
+        .first()
+    )
+
+    if existing:
+        existing.status = status
+        existing.phase_id = phase_id
+        existing.worker_id = worker_id
+        if project_id is not None:
+            existing.project_id = project_id
+        if verification_status is not None:
+            existing.verification_status = verification_status
+        if inputs is not None:
+            existing.inputs = copy.deepcopy(inputs)
+            flag_modified(existing, "inputs")
+        if result is not None:
+            existing.result = copy.deepcopy(result)
+            flag_modified(existing, "result")
+        existing.requires_approval = requires_approval
+        existing.is_approved = is_approved
+        if approved_at is not None:
+            existing.approved_at = approved_at
+        if approved_by is not None:
+            existing.approved_by = approved_by
+        if error_message is not None:
+            existing.error_message = error_message
+        if started_at is not None:
+            existing.started_at = started_at
+        if completed_at is not None:
+            existing.completed_at = completed_at
+        existing.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    record_id = f"wt_{execution_id[:8]}_{task_id}"
+    task_record = WorkforceTask(
+        id=record_id,
+        execution_id=execution_id,
+        project_id=project_id,
+        task_id=task_id,
+        phase_id=phase_id,
+        worker_id=worker_id,
+        status=status,
+        verification_status=verification_status,
+        inputs=inputs or {},
+        result=result,
+        requires_approval=requires_approval,
+        is_approved=is_approved,
+        approved_at=approved_at,
+        approved_by=approved_by,
+        error_message=error_message,
+        started_at=started_at or datetime.utcnow(),
+        completed_at=completed_at,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(task_record)
+    db.commit()
+    db.refresh(task_record)
+    return task_record
+
+
+def get_workforce_tasks(db, execution_id: str):
+    return (
+        db.query(WorkforceTask)
+        .filter(WorkforceTask.execution_id == execution_id)
+        .order_by(WorkforceTask.created_at.asc())
+        .all()
+    )
+
+
+def get_workforce_task(db, execution_id: str, task_id: str):
+    return (
+        db.query(WorkforceTask)
+        .filter(WorkforceTask.execution_id == execution_id, WorkforceTask.task_id == task_id)
+        .first()
+    )
+
+
+def save_project_artifact(
+    db,
+    artifact_id: str,
+    execution_id: str,
+    name: str,
+    artifact_type: str,
+    phase_id: str,
+    producer_worker: str,
+    project_id: str = None,
+    producer_task: str = None,
+    status: str = "AVAILABLE",
+    location: str = "",
+    content_summary: dict = None,
+    metadata_dict: dict = None,
+):
+    from sqlalchemy.orm.attributes import flag_modified
+    import copy
+
+    existing = db.query(ProjectArtifact).filter(ProjectArtifact.id == artifact_id).first()
+    if existing:
+        existing.name = name
+        existing.artifact_type = artifact_type
+        existing.phase_id = phase_id
+        existing.producer_worker = producer_worker
+        existing.producer_task = producer_task
+        existing.status = status
+        existing.location = location
+        if content_summary is not None:
+            existing.content_summary = copy.deepcopy(content_summary)
+            flag_modified(existing, "content_summary")
+        if metadata_dict is not None:
+            existing.metadata_dict = copy.deepcopy(metadata_dict)
+            flag_modified(existing, "metadata_dict")
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    art_record = ProjectArtifact(
+        id=artifact_id,
+        execution_id=execution_id,
+        project_id=project_id,
+        name=name,
+        artifact_type=artifact_type,
+        phase_id=phase_id,
+        producer_worker=producer_worker,
+        producer_task=producer_task,
+        status=status,
+        location=location or "",
+        content_summary=content_summary or {},
+        metadata_dict=metadata_dict or {},
+        created_at=datetime.utcnow(),
+    )
+    db.add(art_record)
+    db.commit()
+    db.refresh(art_record)
+    return art_record
+
+
+def get_project_artifacts(db, execution_id: str):
+    return (
+        db.query(ProjectArtifact)
+        .filter(ProjectArtifact.execution_id == execution_id)
+        .order_by(ProjectArtifact.created_at.asc())
+        .all()
+    )
+
+
+def save_workforce_step(
+    db,
+    execution_id: str,
+    step_number: int,
+    task_id: str,
+    worker_id: str,
+    phase_id: str,
+    dispatch_status: str,
+    runtime_status: str = None,
+    verification_status: str = None,
+    sync_status: str = None,
+    artifacts_produced: list = None,
+    receipts_produced: list = None,
+    newly_ready_tasks: list = None,
+    error: str = None,
+):
+    step_id = f"step_{execution_id[:8]}_{step_number}_{uuid.uuid4().hex[:6]}"
+    step_record = WorkforceStep(
+        id=step_id,
+        execution_id=execution_id,
+        step_number=step_number,
+        task_id=task_id,
+        worker_id=worker_id,
+        phase_id=phase_id,
+        dispatch_status=dispatch_status,
+        runtime_status=runtime_status,
+        verification_status=verification_status,
+        sync_status=sync_status,
+        artifacts_produced=artifacts_produced or [],
+        receipts_produced=receipts_produced or [],
+        newly_ready_tasks=newly_ready_tasks or [],
+        error=error,
+        executed_at=datetime.utcnow(),
+    )
+    db.add(step_record)
+    db.commit()
+    db.refresh(step_record)
+    return step_record
+
+
+def get_workforce_steps(db, execution_id: str):
+    return (
+        db.query(WorkforceStep)
+        .filter(WorkforceStep.execution_id == execution_id)
+        .order_by(WorkforceStep.step_number.asc())
+        .all()
+    )
+
+
+def save_health_report(
+    db,
+    report_id: str,
+    execution_id: str,
+    status: str,
+    project_id: str = None,
+    assessed_url: str = None,
+    observations: list = None,
+    findings: list = None,
+    unavailable_signals: list = None,
+    recommendations: list = None,
+    provenance: dict = None,
+):
+    from sqlalchemy.orm.attributes import flag_modified
+    import copy
+
+    existing = db.query(HealthReportRecord).filter(HealthReportRecord.id == report_id).first()
+    if existing:
+        existing.status = status
+        existing.assessed_url = assessed_url
+        if observations is not None:
+            existing.observations = copy.deepcopy(observations)
+            flag_modified(existing, "observations")
+        if findings is not None:
+            existing.findings = copy.deepcopy(findings)
+            flag_modified(existing, "findings")
+        if unavailable_signals is not None:
+            existing.unavailable_signals = copy.deepcopy(unavailable_signals)
+            flag_modified(existing, "unavailable_signals")
+        if recommendations is not None:
+            existing.recommendations = copy.deepcopy(recommendations)
+            flag_modified(existing, "recommendations")
+        if provenance is not None:
+            existing.provenance = copy.deepcopy(provenance)
+            flag_modified(existing, "provenance")
+        existing.assessed_at = datetime.utcnow()
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    report_record = HealthReportRecord(
+        id=report_id,
+        execution_id=execution_id,
+        project_id=project_id,
+        status=status,
+        assessed_url=assessed_url,
+        observations=observations or [],
+        findings=findings or [],
+        unavailable_signals=unavailable_signals or [],
+        recommendations=recommendations or [],
+        provenance=provenance or {},
+        assessed_at=datetime.utcnow(),
+    )
+    db.add(report_record)
+    db.commit()
+    db.refresh(report_record)
+    return report_record
+
+
+def get_latest_health_report(db, execution_id: str):
+    return (
+        db.query(HealthReportRecord)
+        .filter(HealthReportRecord.execution_id == execution_id)
+        .order_by(HealthReportRecord.assessed_at.desc())
+        .first()
+    )
+
 

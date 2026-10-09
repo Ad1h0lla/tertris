@@ -677,8 +677,72 @@ class ProjectContext(BaseModel):
                         )
                     )
 
+                # 3. Project dedicated ProjectArtifact table entries
+                try:
+                    from database.models import ProjectArtifact
+                    art_rows = db.query(ProjectArtifact).filter(ProjectArtifact.execution_id == execution_id).all()
+                    for ar in art_rows:
+                        context.add_artifact(
+                            Artifact(
+                                artifact_id=ar.id,
+                                name=ar.name,
+                                artifact_type=ar.artifact_type,
+                                phase_id=ar.phase_id,
+                                producer_worker=ar.producer_worker,
+                                producer_task=ar.producer_task,
+                                status=ar.status,
+                                location=ar.location,
+                                content_summary=ar.content_summary or {},
+                                metadata=ar.metadata_dict or {},
+                                created_at=ar.created_at.isoformat() if ar.created_at else _utc_now_iso(),
+                            ),
+                            allow_replace=True,
+                        )
+                except Exception:
+                    pass
+
+                # 4. Project HealthReportRecord entries
+                try:
+                    from database.models import HealthReportRecord
+                    latest_rep = (
+                        db.query(HealthReportRecord)
+                        .filter(HealthReportRecord.execution_id == execution_id)
+                        .order_by(HealthReportRecord.assessed_at.desc())
+                        .first()
+                    )
+                    if latest_rep:
+                        context.add_artifact(
+                            Artifact(
+                                artifact_id=latest_rep.id,
+                                name="Health Report",
+                                artifact_type="health_report",
+                                phase_id="phase_health",
+                                producer_worker="worker_health",
+                                content_summary={
+                                    "report_id": latest_rep.id,
+                                    "status": latest_rep.status,
+                                    "assessed_url": latest_rep.assessed_url,
+                                    "observations": latest_rep.observations,
+                                    "findings": latest_rep.findings,
+                                    "unavailable_signals": latest_rep.unavailable_signals,
+                                    "recommendations": latest_rep.recommendations,
+                                    "provenance": latest_rep.provenance,
+                                    "assessed_at": latest_rep.assessed_at.isoformat() if latest_rep.assessed_at else None,
+                                },
+                                metadata={
+                                    "verification_status": "PASS",
+                                    "overall_status": latest_rep.status,
+                                },
+                                status="AVAILABLE",
+                            ),
+                            allow_replace=True,
+                        )
+                except Exception:
+                    pass
+
             return context
 
         finally:
             if close_db and db:
                 db.close()
+
