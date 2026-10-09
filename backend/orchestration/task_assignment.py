@@ -75,7 +75,7 @@ DEFAULT_WORKER_CONTEXT_KEYS: Dict[str, List[str]] = {
     "worker_email": ["idea", "target_users", "distribution", "pricing", "deployment", "launch_verification"],
     "worker_deployment": ["idea", "code_assets", "specifications", "simulation", "acceptance_criteria"],
     "worker_launch_verification": ["idea", "deployment", "receipts", "simulation", "code_assets"],
-    "worker_health": ["idea", "deployment", "receipts", "definition"],
+    "worker_health": ["idea", "deployment", "launch_verification", "launch", "receipts", "distribution", "definition", "acceptance_criteria", "health"],
 }
 
 # Artifact bindings (what artifact types a worker consumes and is expected to produce)
@@ -141,8 +141,8 @@ DEFAULT_WORKER_ARTIFACT_MAP: Dict[str, Dict[str, List[str]]] = {
         "produces": ["launch_verification", "launch_receipt"],
     },
     "worker_health": {
-        "consumes": ["deployment_bundle", "live_service"],
-        "produces": ["health_report", "uptime_metrics"],
+        "consumes": ["deployment_bundle", "deployment_receipt", "launch_verification", "launch_receipt", "distribution_receipt"],
+        "produces": ["health_report", "improvement_recommendations"],
     },
 }
 
@@ -486,6 +486,16 @@ class TaskAssignmentEngine:
                 task_readiness = TaskReadiness.WAITING.value
                 task.metadata["waiting_on"] = unfulfilled_deps
                 waiting_tasks.append(task.task_id)
+            elif wid in ("worker_health", "worker_monitor", "worker_operate") and not (
+                project_context.is_live
+                or project_context.verified_live_url
+                or bool(project_context.get_artifacts_by_type("deployment_receipt"))
+                or bool(project_context.get_artifacts_by_type("deployment_bundle"))
+                or bool(project_context.get_artifacts_by_type("launch_verification"))
+            ):
+                task_readiness = TaskReadiness.BLOCKED.value
+                task.metadata["blocked_reason"] = "Missing verified live deployment or launch verification in ProjectContext"
+                blocked_tasks.append(task.task_id)
             else:
                 task_readiness = TaskReadiness.READY.value
                 ready_tasks.append(task.task_id)

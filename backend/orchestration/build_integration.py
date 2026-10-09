@@ -80,6 +80,7 @@ from orchestration.worker_runtime import (
     CodeWorkerAdapter,
     DeploymentWorkerAdapter,
     EmailWorkerAdapter,
+    HealthWorkerAdapter,
     LaunchVerificationWorkerAdapter,
     LinkedInWorkerAdapter,
     RedditWorkerAdapter,
@@ -88,6 +89,18 @@ from orchestration.worker_runtime import (
     WorkerRuntimeRegistry,
     XWorkerAdapter,
     get_default_runtime_registry,
+)
+from health.monitor import (
+    BaseHealthObserver,
+    Finding,
+    HealthReport,
+    HealthStatus,
+    MockHealthObserver,
+    Observation,
+    RealHttpHealthObserver,
+    Recommendation,
+    evaluate_health,
+    validate_target_url,
 )
 from orchestration.workforce_coordinator import (
     CoordinatorResult,
@@ -1832,5 +1845,560 @@ def execute_build_simulation_deployment_launch_distribution_vertical_slice(
         step_history=coordinator_res.step_history,
         errors=coordinator_res.errors,
     )
+
+
+# =============================================================================
+# 9. Stage 6F: Health / Operate Workforce Vertical Slice
+# =============================================================================
+
+class HealthAssessmentSliceResult(BaseModel):
+    """
+    Comprehensive outcome and provenance audit produced by the Stage 6F
+    Health / Operate Workforce vertical slice.
+    """
+    success: bool
+    status: str
+    health_status: str = "UNKNOWN"
+    project_id: str
+    execution_id: str
+    coordinator_result: CoordinatorResult
+    project_context: ProjectContext
+    workflow: ProjectWorkflow
+    team_plan: TeamPlan
+    task_plan: CompiledTaskPlan
+    health_report: Optional[HealthReport] = None
+    artifacts: List[Artifact] = Field(default_factory=list)
+    step_history: List[CoordinatorStepRecord] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+    executed_at: str = Field(default_factory=_utc_now_iso)
+
+    model_config = {
+        "extra": "ignore",
+    }
+
+    @property
+    def is_completed(self) -> bool:
+        return self.success and self.status == CoordinatorStatus.COMPLETED.value
+
+    @property
+    def is_healthy(self) -> bool:
+        return self.is_completed and self.health_status == "HEALTHY"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _sanitize_dict_secrets(self.model_dump())
+
+
+class BuildSimulationDeploymentLaunchDistributionHealthSliceResult(BaseModel):
+    """
+    Comprehensive outcome and provenance audit produced by the full 6-phase
+    (Build -> Simulation -> Deployment -> Launch Verification -> Distribution -> Health) vertical slice.
+    """
+    success: bool
+    status: str
+    is_live: bool = False
+    is_distributed: bool = False
+    health_status: str = "UNKNOWN"
+    project_id: str
+    execution_id: str
+    coordinator_result: CoordinatorResult
+    project_context: ProjectContext
+    workflow: ProjectWorkflow
+    team_plan: TeamPlan
+    task_plan: CompiledTaskPlan
+    build_artifacts: List[Artifact] = Field(default_factory=list)
+    simulation_artifacts: List[Artifact] = Field(default_factory=list)
+    deployment_artifacts: List[Artifact] = Field(default_factory=list)
+    launch_artifacts: List[Artifact] = Field(default_factory=list)
+    distribution_artifacts: List[Artifact] = Field(default_factory=list)
+    health_artifacts: List[Artifact] = Field(default_factory=list)
+    all_artifacts: List[Artifact] = Field(default_factory=list)
+    step_history: List[CoordinatorStepRecord] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+    executed_at: str = Field(default_factory=_utc_now_iso)
+
+    model_config = {
+        "extra": "ignore",
+    }
+
+    @property
+    def is_completed(self) -> bool:
+        return self.success and self.status == CoordinatorStatus.COMPLETED.value
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _sanitize_dict_secrets(self.model_dump())
+
+
+def create_health_assessment_workflow(
+    project_context: ProjectContext,
+    phase_id: str = "phase_health",
+    phase_name: str = "Operational Health & Monitoring",
+) -> ProjectWorkflow:
+    """
+    Constructs a focused, canonical ProjectWorkflow containing the Health phase (worker_health)
+    for assessing an existing LIVE project without replaying previous phases.
+    """
+    wf = ProjectWorkflow(
+        project_id=project_context.project_id,
+        execution_id=project_context.execution_id,
+    )
+
+    has_live_deployment = bool(
+        project_context.is_live
+        or project_context.verified_live_url
+        or bool(project_context.get_artifacts_by_type("deployment_receipt"))
+        or bool(project_context.get_artifacts_by_type("deployment_bundle"))
+        or bool(project_context.get_artifacts_by_type("launch_verification"))
+    )
+
+    health_phase = Phase(
+        phase_id=phase_id,
+        phase_number=1,
+        name=phase_name,
+        description="Assesses operational reachability, telemetry signals, and generates improvement recommendations.",
+        purpose="Monitor operational health post-launch.",
+        status=PhaseStatus.READY if has_live_deployment else PhaseStatus.BLOCKED,
+        dependencies=[],
+        entry_requirements=["verified_live_deployment"],
+        exit_requirements=["health_report", "health_assessment_pass"],
+        metadata={
+            "required_capabilities": ["health_monitoring", "endpoint_check", "synthetic_monitoring"],
+            "context_keys": ["idea", "deployment", "launch_verification", "receipts", "distribution", "definition", "acceptance_criteria", "health"],
+            "blocked_reason": None if has_live_deployment else "Project has no verified live deployment reference or URL.",
+        },
+    )
+
+    health_phase.add_worker(
+        WorkerAssignment(
+            worker_id="worker_health",
+            phase_id=phase_id,
+            role="health_monitor",
+            capabilities=["health_monitoring", "endpoint_check", "synthetic_monitoring", "cron_inspection"],
+            permissions=["network:read"],
+            dependencies=[],
+            metadata={
+                "consumes_artifacts": ["deployment_bundle", "deployment_receipt", "launch_verification", "launch_receipt", "distribution_receipt"],
+                "produces_artifacts": ["health_report", "improvement_recommendations"],
+            },
+        )
+    )
+
+    wf.add_phase(health_phase)
+    return wf
+
+
+def create_build_simulation_deployment_launch_distribution_health_workflow(
+    project_context: ProjectContext,
+    build_phase_id: str = "phase_build",
+    simulation_phase_id: str = "phase_simulation",
+    deployment_phase_id: str = "phase_deployment",
+    launch_phase_id: str = "phase_launch_verification",
+    distribution_phase_id: str = "phase_distribution",
+    health_phase_id: str = "phase_health",
+    channels: Optional[List[str]] = None,
+) -> ProjectWorkflow:
+    """
+    Constructs a canonical 6-phase ProjectWorkflow
+    (Build -> Simulation -> Deployment -> Launch Verification -> Distribution -> Health).
+    """
+    wf = create_build_simulation_deployment_launch_distribution_workflow(
+        project_context=project_context,
+        build_phase_id=build_phase_id,
+        simulation_phase_id=simulation_phase_id,
+        deployment_phase_id=deployment_phase_id,
+        launch_phase_id=launch_phase_id,
+        distribution_phase_id=distribution_phase_id,
+        channels=channels,
+    )
+
+    health_phase = Phase(
+        phase_id=health_phase_id,
+        phase_number=6,
+        name="Operational Health & Monitoring",
+        description="Assesses operational reachability, telemetry signals, and generates improvement recommendations.",
+        purpose="Monitor operational health post-launch.",
+        status=PhaseStatus.PLANNED,
+        dependencies=[distribution_phase_id],
+        entry_requirements=["verified_live_deployment", "launch_verification"],
+        exit_requirements=["health_report", "health_assessment_pass"],
+        metadata={
+            "required_capabilities": ["health_monitoring", "endpoint_check", "synthetic_monitoring"],
+            "context_keys": ["idea", "deployment", "launch_verification", "receipts", "distribution", "definition", "acceptance_criteria", "health"],
+        },
+    )
+
+    health_phase.add_worker(
+        WorkerAssignment(
+            worker_id="worker_health",
+            phase_id=health_phase_id,
+            role="health_monitor",
+            capabilities=["health_monitoring", "endpoint_check", "synthetic_monitoring", "cron_inspection"],
+            permissions=["network:read"],
+            dependencies=[],
+            metadata={
+                "consumes_artifacts": ["deployment_bundle", "deployment_receipt", "launch_verification", "launch_receipt", "distribution_receipt"],
+                "produces_artifacts": ["health_report", "improvement_recommendations"],
+            },
+        )
+    )
+
+    wf.add_phase(health_phase, dependencies=[distribution_phase_id])
+    return wf
+
+
+def execute_health_assessment_vertical_slice(
+    project_context: Optional[ProjectContext] = None,
+    project_data: Optional[Dict[str, Any]] = None,
+    observer: Optional[Any] = None,
+    response_time_threshold_ms: float = 500.0,
+    registry: Optional[WorkerRegistry] = None,
+    runtime: Optional[WorkerRuntime] = None,
+    coordinator: Optional[WorkforceCoordinator] = None,
+    connected_connectors: Optional[Set[str] | List[str]] = None,
+    authorized_permissions: Optional[Set[str] | List[str]] = None,
+    dry_run: bool = False,
+) -> HealthAssessmentSliceResult:
+    """
+    Executes a focused Stage 6F Health Assessment Vertical Slice on an existing LIVE ProjectContext.
+
+    Canonical Execution Path:
+        ProjectContext
+        → TeamManager
+        → WorkerRegistry
+        → TaskAssignmentEngine
+        → WorkforceCoordinator
+        → ExecutionDispatcher
+        → WorkerRuntime
+        → HealthWorkerAdapter
+        → ContextSynchronizer
+        → GraphAdvancer
+    """
+    reg = registry or get_default_registry()
+    conns = connected_connectors if connected_connectors is not None else []
+    perms = authorized_permissions if authorized_permissions is not None else ["network:read"]
+
+    # 1. Authoritative ProjectContext
+    if project_context is None:
+        if project_data:
+            ctx = from_legacy_project_dict(project_data)
+        else:
+            ctx = create_build_project_context()
+    else:
+        ctx = project_context
+
+    # 2. Build focused Health ProjectWorkflow
+    workflow = create_health_assessment_workflow(ctx)
+
+    # 3. Team Assembly via TeamManager
+    team_mgr = TeamManager(registry=reg)
+    team_plan = team_mgr.evaluate_team(
+        workflow=workflow,
+        project_context=ctx.get_slice(["idea", "goal", "requirements", "deployment", "launch_verification"]),
+        connected_connectors=conns,
+        authorized_permissions=perms,
+    )
+    team_plan.apply_to_workflow(workflow)
+
+    # 4. Task Compilation via TaskAssignmentEngine
+    task_engine = TaskAssignmentEngine(registry=reg)
+    task_plan = task_engine.assign_tasks(
+        project_context=ctx,
+        workflow=workflow,
+        team_plan=team_plan,
+        connected_connectors=conns,
+        authorized_permissions=perms,
+    )
+
+    if not task_plan.is_executable():
+        coord_res = CoordinatorResult(
+            status=CoordinatorStatus.INVALID.value if task_plan.validation_errors else CoordinatorStatus.BLOCKED.value,
+            project_id=ctx.project_id,
+            execution_id=ctx.execution_id,
+            steps_executed=0,
+            blocked_tasks=task_plan.blocked_tasks,
+            reason=f"Task plan compilation did not reach READY state: {'; '.join(task_plan.validation_errors or [t.metadata.get('blocked_reason', 'Task blocked') for t in task_plan.tasks])}",
+            errors=task_plan.validation_errors or [t.metadata.get("blocked_reason", "Task blocked") for t in task_plan.tasks if t.metadata.get("blocked_reason")],
+        )
+        return HealthAssessmentSliceResult(
+            success=False,
+            status=coord_res.status,
+            health_status="UNKNOWN",
+            project_id=ctx.project_id,
+            execution_id=ctx.execution_id,
+            coordinator_result=coord_res,
+            project_context=ctx,
+            workflow=workflow,
+            team_plan=team_plan,
+            task_plan=task_plan,
+            health_report=None,
+            artifacts=[],
+            step_history=[],
+            errors=coord_res.errors,
+        )
+
+    # 5. Execution via WorkforceCoordinator
+    if coordinator is None:
+        dispatcher = ExecutionDispatcher(registry=reg, dispatch_registry=DispatchRegistry())
+        rt = runtime or WorkerRuntime(registry=reg, runtime_registry=WorkerRuntimeRegistry())
+        health_adapter = HealthWorkerAdapter(
+            observer=observer,
+            response_time_threshold_ms=response_time_threshold_ms,
+        )
+        rt.register_worker(health_adapter)
+        sync = ContextSynchronizer()
+        advancer = GraphAdvancer()
+        coord = WorkforceCoordinator(
+            dispatcher=dispatcher,
+            runtime=rt,
+            context_sync=sync,
+            graph_advancer=advancer,
+        )
+    else:
+        coord = coordinator
+
+    coordinator_res = coord.run_workflow(
+        project_context=ctx,
+        compiled_task_plan=task_plan,
+        connected_connectors=conns,
+        authorized_permissions=perms,
+        dry_run=dry_run,
+    )
+
+    # 6. Extract Promoted Health Artifacts from ProjectContext
+    health_artifacts = [
+        art for art in ctx.artifacts.values()
+        if art.phase_id == "phase_health" or art.producer_worker == "worker_health"
+    ]
+
+    # Find health report object
+    parsed_report = None
+    health_status_val = "UNKNOWN"
+    for art in health_artifacts:
+        if art.artifact_type == "health_report":
+            summary_dict = art.content_summary or {}
+            try:
+                parsed_report = HealthReport.from_dict(summary_dict)
+                health_status_val = parsed_report.status
+            except Exception:
+                health_status_val = str(summary_dict.get("status", "UNKNOWN"))
+            break
+
+    return HealthAssessmentSliceResult(
+        success=coordinator_res.is_completed,
+        status=coordinator_res.status,
+        health_status=health_status_val,
+        project_id=ctx.project_id,
+        execution_id=ctx.execution_id,
+        coordinator_result=coordinator_res,
+        project_context=ctx,
+        workflow=workflow,
+        team_plan=team_plan,
+        task_plan=task_plan,
+        health_report=parsed_report,
+        artifacts=health_artifacts,
+        step_history=coordinator_res.step_history,
+        errors=coordinator_res.errors,
+    )
+
+
+def execute_build_simulation_deployment_launch_distribution_health_vertical_slice(
+    project_context: Optional[ProjectContext] = None,
+    project_data: Optional[Dict[str, Any]] = None,
+    registry: Optional[WorkerRegistry] = None,
+    runtime: Optional[WorkerRuntime] = None,
+    coordinator: Optional[WorkforceCoordinator] = None,
+    channels: Optional[List[str]] = None,
+    connected_connectors: Optional[Set[str] | List[str]] = None,
+    authorized_permissions: Optional[Set[str] | List[str]] = None,
+    approved_task_ids: Optional[Set[str] | List[str]] = None,
+    http_verifier: Optional[Callable[[str], Dict[str, Any]]] = None,
+    reddit_client: Optional[Any] = None,
+    x_client: Optional[Any] = None,
+    linkedin_client: Optional[Any] = None,
+    email_client: Optional[Any] = None,
+    health_observer: Optional[Any] = None,
+    response_time_threshold_ms: float = 500.0,
+    dry_run: bool = False,
+) -> BuildSimulationDeploymentLaunchDistributionHealthSliceResult:
+    """
+    Executes the full 6-phase vertical slice end-to-end
+    (Build -> Simulation -> Deployment -> Launch Verification -> Distribution -> Health).
+    """
+    reg = registry or get_default_registry()
+    conns = connected_connectors if connected_connectors is not None else [
+        "vercel", "redditapis", "twitter", "linkedin", "sendgrid", "smtp"
+    ]
+    perms = authorized_permissions if authorized_permissions is not None else [
+        "filesystem:write", "workspace:edit", "execution:test", "deployment:execute",
+        "network:read", "network:write:approval_required"
+    ]
+
+    # 1. Context
+    if project_context is None:
+        if project_data:
+            ctx = from_legacy_project_dict(project_data)
+        else:
+            ctx = create_build_project_context()
+    else:
+        ctx = project_context
+
+    # 2. Workflow
+    workflow = create_build_simulation_deployment_launch_distribution_health_workflow(
+        project_context=ctx,
+        channels=channels,
+    )
+
+    # 3. Team Plan
+    team_mgr = TeamManager(registry=reg)
+    team_plan = team_mgr.evaluate_team(
+        workflow=workflow,
+        project_context=ctx.get_slice(["idea", "goal", "requirements", "acceptance_criteria"]),
+        connected_connectors=conns,
+        authorized_permissions=perms,
+    )
+    team_plan.apply_to_workflow(workflow)
+
+    # 4. Task Plan
+    task_engine = TaskAssignmentEngine(registry=reg)
+    task_plan = task_engine.assign_tasks(
+        project_context=ctx,
+        workflow=workflow,
+        team_plan=team_plan,
+        connected_connectors=conns,
+        authorized_permissions=perms,
+    )
+
+    if not task_plan.is_executable():
+        coord_res = CoordinatorResult(
+            status=CoordinatorStatus.INVALID.value if task_plan.validation_errors else CoordinatorStatus.BLOCKED.value,
+            project_id=ctx.project_id,
+            execution_id=ctx.execution_id,
+            steps_executed=0,
+            blocked_tasks=task_plan.blocked_tasks,
+            reason=f"Task plan compilation did not reach READY state: {'; '.join(task_plan.validation_errors)}",
+            errors=task_plan.validation_errors,
+        )
+        return BuildSimulationDeploymentLaunchDistributionHealthSliceResult(
+            success=False,
+            status=coord_res.status,
+            is_live=False,
+            is_distributed=False,
+            health_status="UNKNOWN",
+            project_id=ctx.project_id,
+            execution_id=ctx.execution_id,
+            coordinator_result=coord_res,
+            project_context=ctx,
+            workflow=workflow,
+            team_plan=team_plan,
+            task_plan=task_plan,
+            errors=task_plan.validation_errors,
+        )
+
+    # 5. Coordinator Setup
+    if coordinator is None:
+        dispatcher = ExecutionDispatcher(registry=reg, dispatch_registry=DispatchRegistry())
+        rt = runtime or WorkerRuntime(registry=reg, runtime_registry=WorkerRuntimeRegistry())
+        if not rt.resolve_worker("worker_code"):
+            rt.register_worker(CodeWorkerAdapter())
+        if not rt.resolve_worker("worker_qa_simulation"):
+            rt.register_worker(SimulationWorkerAdapter())
+        if not rt.resolve_worker("worker_deployment"):
+            rt.register_worker(DeploymentWorkerAdapter())
+        verifier = http_verifier or (lambda url: {"status": "PASS", "http_status": 200, "url": url, "response_time_ms": 25.0, "error": None})
+        rt.register_worker(LaunchVerificationWorkerAdapter(http_verifier=verifier))
+        if not rt.resolve_worker("worker_campaign"):
+            rt.register_worker(CampaignWorkerAdapter())
+        if not rt.resolve_worker("worker_reddit") or reddit_client is not None:
+            rt.register_worker(RedditWorkerAdapter(client=reddit_client))
+        if not rt.resolve_worker("worker_x") or x_client is not None:
+            rt.register_worker(XWorkerAdapter(client=x_client))
+        if not rt.resolve_worker("worker_linkedin") or linkedin_client is not None:
+            rt.register_worker(LinkedInWorkerAdapter(client=linkedin_client))
+        if not rt.resolve_worker("worker_email") or email_client is not None:
+            rt.register_worker(EmailWorkerAdapter(client=email_client))
+        rt.register_worker(HealthWorkerAdapter(observer=health_observer, response_time_threshold_ms=response_time_threshold_ms))
+
+        sync = ContextSynchronizer()
+        advancer = GraphAdvancer()
+        coord = WorkforceCoordinator(
+            dispatcher=dispatcher,
+            runtime=rt,
+            context_sync=sync,
+            graph_advancer=advancer,
+        )
+    else:
+        coord = coordinator
+
+    approved = set(approved_task_ids) if approved_task_ids is not None else {t.task_id for t in task_plan.tasks}
+
+    coordinator_res = coord.run_workflow(
+        project_context=ctx,
+        compiled_task_plan=task_plan,
+        connected_connectors=conns,
+        authorized_permissions=perms,
+        approved_task_ids=approved,
+        dry_run=dry_run,
+    )
+
+    # 6. Extract Deliverables
+    build_artifacts = [
+        art for art in ctx.artifacts.values()
+        if art.phase_id == "phase_build" or art.producer_worker == "worker_code"
+    ]
+    sim_artifacts = [
+        art for art in ctx.artifacts.values()
+        if art.phase_id == "phase_simulation" or art.producer_worker == "worker_qa_simulation"
+    ]
+    dep_artifacts = [
+        art for art in ctx.artifacts.values()
+        if art.phase_id == "phase_deployment" or art.producer_worker == "worker_deployment"
+    ]
+    launch_artifacts = [
+        art for art in ctx.artifacts.values()
+        if art.phase_id == "phase_launch_verification" or art.producer_worker == "worker_launch_verification"
+    ]
+    dist_worker_ids = {"worker_campaign", "worker_reddit", "worker_x", "worker_linkedin", "worker_email"}
+    dist_artifacts = [
+        art for art in ctx.artifacts.values()
+        if art.phase_id == "phase_distribution" or art.producer_worker in dist_worker_ids
+    ]
+    health_artifacts = [
+        art for art in ctx.artifacts.values()
+        if art.phase_id == "phase_health" or art.producer_worker == "worker_health"
+    ]
+
+    health_status_val = "UNKNOWN"
+    for art in health_artifacts:
+        if art.artifact_type == "health_report":
+            summary_dict = art.content_summary or {}
+            health_status_val = str(summary_dict.get("status", "UNKNOWN"))
+            break
+
+    is_live_outcome = ctx.is_live and coordinator_res.is_completed
+    is_distributed_outcome = ctx.is_distributed and coordinator_res.is_completed
+
+    return BuildSimulationDeploymentLaunchDistributionHealthSliceResult(
+        success=coordinator_res.is_completed,
+        status=coordinator_res.status,
+        is_live=is_live_outcome,
+        is_distributed=is_distributed_outcome,
+        health_status=health_status_val,
+        project_id=ctx.project_id,
+        execution_id=ctx.execution_id,
+        coordinator_result=coordinator_res,
+        project_context=ctx,
+        workflow=workflow,
+        team_plan=team_plan,
+        task_plan=task_plan,
+        build_artifacts=build_artifacts,
+        simulation_artifacts=sim_artifacts,
+        deployment_artifacts=dep_artifacts,
+        launch_artifacts=launch_artifacts,
+        distribution_artifacts=dist_artifacts,
+        health_artifacts=health_artifacts,
+        all_artifacts=list(ctx.artifacts.values()),
+        step_history=coordinator_res.step_history,
+        errors=coordinator_res.errors,
+    )
+
 
 

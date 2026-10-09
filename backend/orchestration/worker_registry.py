@@ -86,6 +86,8 @@ WORKER_ALIASES: Dict[str, str] = {
     "worker_deploy": "worker_deployment",
     "worker_launch": "worker_launch_verification",
     "worker_launch_verify": "worker_launch_verification",
+    "worker_monitor": "worker_health",
+    "worker_operate": "worker_health",
 }
 
 

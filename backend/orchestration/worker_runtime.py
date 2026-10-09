@@ -40,6 +40,21 @@ from orchestration.worker_contract import (
     WorkerState,
 )
 from orchestration.worker_registry import WorkerDescriptor, WorkerRegistry, get_default_registry
+from health.monitor import (
+    BaseHealthObserver,
+    Finding,
+    FindingSeverity,
+    HealthReport,
+    HealthStatus,
+    MockHealthObserver,
+    Observation,
+    ObservationStatus,
+    RealHttpHealthObserver,
+    Recommendation,
+    RecommendationPriority,
+    evaluate_health,
+    validate_target_url,
+)
 
 try:
     from execution.vercel_executor import perform_live_smoke_check
@@ -1742,6 +1757,297 @@ class EmailWorkerAdapter(BaseWorker):
         )
 
 
+class HealthWorkerAdapter(BaseWorker):
+    """
+    Adapts Phase 6 Operational Health & Uptime Monitoring behind the BaseWorker contract (Stage 6F).
+    Collects actual or injected monitoring observations, evaluates evidence,
+    and produces typed HealthReport and Improvement Recommendations.
+    """
+
+    def __init__(
+        self,
+        worker_id: str = "worker_health",
+        name: str = "Operational Health & Uptime Monitor",
+        role: str = "health_monitor",
+        observer: Optional[Any] = None,
+        response_time_threshold_ms: float = 500.0,
+    ):
+        super().__init__(
+            worker_id=worker_id,
+            name=name,
+            role=role,
+            description="Monitors live endpoints, HTTP health status codes, response times, and produces improvement recommendations.",
+            capabilities=["health_monitoring", "endpoint_check", "synthetic_monitoring", "cron_inspection"],
+            required_connectors=[],
+            permissions=["network:read"],
+        )
+        self.observer = observer
+        self.response_time_threshold_ms = response_time_threshold_ms
+
+    def _resolve_target_url(self, task: Task) -> Optional[str]:
+        direct_url = (
+            task.inputs.get("verified_live_url")
+            or task.inputs.get("deployment_url")
+            or task.inputs.get("url")
+            or task.inputs.get("destination_url")
+        )
+        if direct_url and isinstance(direct_url, str) and (direct_url.startswith("http://") or direct_url.startswith("https://")):
+            return direct_url.strip()
+
+        # Check launch verification
+        launch_assets = task.inputs.get("launch_verification", []) + task.inputs.get("launch", [])
+        for item in launch_assets:
+            if isinstance(item, dict):
+                cand = (
+                    item.get("url")
+                    or item.get("deployment_url")
+                    or item.get("live_url")
+                    or (item.get("content") if isinstance(item.get("content"), dict) else {}).get("deployment_url")
+                    or (item.get("content") if isinstance(item.get("content"), dict) else {}).get("url")
+                    or (item.get("content_summary") if isinstance(item.get("content_summary"), dict) else {}).get("deployment_url")
+                    or (item.get("content_summary") if isinstance(item.get("content_summary"), dict) else {}).get("url")
+                )
+                if cand and isinstance(cand, str) and (cand.startswith("http://") or cand.startswith("https://")):
+                    return cand.strip()
+
+        # Check deployment
+        dep_assets = task.inputs.get("deployment", [])
+        for item in dep_assets:
+            if isinstance(item, dict):
+                cand = (
+                    item.get("url")
+                    or item.get("deployment_url")
+                    or item.get("live_url")
+                    or (item.get("content") if isinstance(item.get("content"), dict) else {}).get("url")
+                    or (item.get("content_summary") if isinstance(item.get("content_summary"), dict) else {}).get("url")
+                    or item.get("location")
+                )
+                if cand and isinstance(cand, str) and (cand.startswith("http://") or cand.startswith("https://")):
+                    return cand.strip()
+
+        # Check receipts
+        receipts = task.inputs.get("receipts", [])
+        for rcpt in receipts:
+            if isinstance(rcpt, dict):
+                cand = rcpt.get("permalink") or (rcpt.get("evidence") if isinstance(rcpt.get("evidence"), dict) else {}).get("url")
+                if cand and isinstance(cand, str) and (cand.startswith("http://") or cand.startswith("https://")):
+                    return cand.strip()
+
+        return None
+
+    def prepare_task(self, task: Task, context: Optional[Dict[str, Any]] = None) -> TaskPlan:
+        resolved_url = self._resolve_target_url(task)
+        if not resolved_url:
+            return TaskPlan(
+                task_id=task.task_id,
+                worker_id=self.worker_id,
+                readiness_status="BLOCKED",
+                required_capabilities=self.capabilities,
+                required_connectors=[],
+                approval_requirement=False,
+                validation_errors=["Missing verified live deployment reference or URL. Health assessment is blocked."],
+            )
+
+        is_safe, clean_url, error_msg = validate_target_url(resolved_url)
+        if not is_safe or not clean_url:
+            return TaskPlan(
+                task_id=task.task_id,
+                worker_id=self.worker_id,
+                readiness_status="BLOCKED",
+                required_capabilities=self.capabilities,
+                required_connectors=[],
+                approval_requirement=False,
+                validation_errors=[f"Target deployment URL failed safety policy: {error_msg}"],
+            )
+
+        return TaskPlan(
+            task_id=task.task_id,
+            worker_id=self.worker_id,
+            readiness_status="READY",
+            required_capabilities=self.capabilities,
+            required_connectors=[],
+            approval_requirement=False,
+        )
+
+    def execute_task(self, task: Task, context: Optional[Dict[str, Any]] = None) -> TaskResult:
+        resolved_url = self._resolve_target_url(task)
+        if not resolved_url:
+            return TaskResult(
+                task_id=task.task_id,
+                worker_id=self.worker_id,
+                state=WorkerState.FAILED,
+                output={"status": "ASSESSMENT_FAILED", "error": "Missing verified live deployment URL."},
+                artifacts=[],
+                actions=[{"action": "resolve_deployment_url", "status": "FAILED"}],
+                error="Missing verified live deployment URL.",
+            )
+
+        is_safe, clean_url, error_msg = validate_target_url(resolved_url)
+        if not is_safe or not clean_url:
+            return TaskResult(
+                task_id=task.task_id,
+                worker_id=self.worker_id,
+                state=WorkerState.FAILED,
+                output={"status": "ASSESSMENT_FAILED", "error": f"Target deployment URL rejected by safety policy: {error_msg}"},
+                artifacts=[],
+                actions=[{"action": "validate_target_url", "status": "FAILED"}],
+                error=error_msg or "Invalid URL safety policy violation.",
+            )
+
+        # Collect Observation via observer
+        try:
+            if self.observer is not None:
+                if isinstance(self.observer, BaseHealthObserver):
+                    obs_dict = self.observer.observe_http(clean_url)
+                elif callable(self.observer):
+                    obs_dict = self.observer(clean_url)
+                elif isinstance(self.observer, dict):
+                    obs_dict = dict(self.observer)
+                else:
+                    obs_dict = {"status": "ERROR", "error": "Invalid observer configuration."}
+            else:
+                # Default production/mock observer
+                obs_dict = RealHttpHealthObserver().observe_http(clean_url)
+        except Exception as exc:
+            return TaskResult(
+                task_id=task.task_id,
+                worker_id=self.worker_id,
+                state=WorkerState.FAILED,
+                output={
+                    "status": "ASSESSMENT_FAILED",
+                    "error": f"Observation adapter crashed or failed: {str(exc)}",
+                    "assessed_url": clean_url,
+                },
+                artifacts=[],
+                actions=[{"action": "collect_observations", "status": "FAILED"}],
+                error=f"Observation infrastructure failure: {str(exc)}",
+            )
+
+        # Check for observer infrastructure error
+        if obs_dict.get("status") == "ERROR" and obs_dict.get("http_status") is None and "Unsafe" not in str(obs_dict.get("error")):
+            return TaskResult(
+                task_id=task.task_id,
+                worker_id=self.worker_id,
+                state=WorkerState.FAILED,
+                output={
+                    "status": "ASSESSMENT_FAILED",
+                    "error": obs_dict.get("error") or "Observation infrastructure failure.",
+                    "assessed_url": clean_url,
+                },
+                artifacts=[],
+                actions=[{"action": "collect_observations", "status": "FAILED"}],
+                error=obs_dict.get("error") or "Observation infrastructure error.",
+            )
+
+        # Gather upstream artifacts and receipts from inputs
+        dep_assets = task.inputs.get("deployment", [])
+        dep_art = dep_assets[0] if (dep_assets and isinstance(dep_assets, list)) else (dep_assets if isinstance(dep_assets, dict) else None)
+        launch_assets = task.inputs.get("launch_verification", []) + task.inputs.get("launch", [])
+        launch_art = launch_assets[0] if (launch_assets and isinstance(launch_assets, list)) else (launch_assets if isinstance(launch_assets, dict) else None)
+        dist_receipts = task.inputs.get("receipts", []) + task.inputs.get("distribution", [])
+
+        deployment_ref = None
+        if dep_art and isinstance(dep_art, dict):
+            deployment_ref = dep_art.get("artifact_id") or dep_art.get("id") or dep_art.get("name")
+
+        # Evaluate observations into structured report
+        report = evaluate_health(
+            project_id=task.project_id,
+            execution_id=task.execution_id,
+            assessed_url=clean_url,
+            deployment_reference=deployment_ref,
+            http_observation=obs_dict,
+            deployment_artifact=dep_art,
+            launch_artifact=launch_art,
+            distribution_receipts=dist_receipts,
+            response_time_threshold_ms=self.response_time_threshold_ms,
+            provenance={
+                "worker_id": self.worker_id,
+                "task_id": task.task_id,
+                "phase_id": task.metadata.get("phase_id", "phase_health"),
+                "execution_id": task.execution_id,
+                "project_id": task.project_id,
+            },
+        )
+
+        report_dict = report.to_dict()
+
+        artifacts_list = [
+            {
+                "artifact_type": "health_report",
+                "name": "Operational Health Report",
+                "status": report.status,
+                "url": clean_url,
+                "content": report_dict,
+                "metadata": {
+                    "health_status": report.status,
+                    "findings_count": len(report.findings),
+                    "recommendations_count": len(report.recommendations),
+                    "verified": True,
+                    "verification_status": "PASS",
+                },
+            }
+        ]
+
+        if report.recommendations:
+            artifacts_list.append(
+                {
+                    "artifact_type": "improvement_recommendations",
+                    "name": "Operational Improvement Recommendations",
+                    "content": {
+                        "recommendations": [r.to_dict() for r in report.recommendations],
+                        "count": len(report.recommendations),
+                        "project_id": task.project_id,
+                    },
+                    "metadata": {
+                        "count": len(report.recommendations),
+                        "verified": True,
+                        "verification_status": "PASS",
+                    },
+                }
+            )
+
+        return TaskResult(
+            task_id=task.task_id,
+            worker_id=self.worker_id,
+            state=WorkerState.SUCCESS,
+            output=report_dict,
+            artifacts=artifacts_list,
+            actions=[
+                {
+                    "action": "execute_health_assessment",
+                    "status": "COMPLETED",
+                    "health_status": report.status,
+                    "assessed_url": clean_url,
+                    "findings_count": len(report.findings),
+                }
+            ],
+        )
+
+    def verify_result(self, task_result: TaskResult) -> VerificationResult:
+        out = task_result.output or {}
+        if (
+            task_result.state == WorkerState.SUCCESS
+            and out.get("report_id")
+            and out.get("status") in ("HEALTHY", "DEGRADED", "UNHEALTHY", "UNKNOWN")
+            and isinstance(out.get("observations"), list)
+            and isinstance(out.get("findings"), list)
+        ):
+            return VerificationResult.pass_result(
+                evidence={
+                    "report_id": out.get("report_id"),
+                    "health_status": out.get("status"),
+                    "assessed_url": out.get("assessed_url"),
+                    "observations_count": len(out.get("observations", [])),
+                    "findings_count": len(out.get("findings", [])),
+                    "recommendations_count": len(out.get("recommendations", [])),
+                }
+            )
+        return VerificationResult.fail_result(
+            error=task_result.error or out.get("error") or "Health assessment verification failed: missing valid report structure."
+        )
+
+
 class WorkerRuntime:
     """
     Executes BaseWorker instances from validated ExecutionEnvelopes with
@@ -1772,6 +2078,7 @@ class WorkerRuntime:
         self.register_worker(XWorkerAdapter())
         self.register_worker(LinkedInWorkerAdapter())
         self.register_worker(EmailWorkerAdapter())
+        self.register_worker(HealthWorkerAdapter())
 
         if custom_workers:
             for w in custom_workers.values():

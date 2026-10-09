@@ -306,6 +306,9 @@ class ProjectContext(BaseModel):
             output["phase_history"] = {pid: p.to_dict() for pid, p in self.phase_history.items()}
         if "metadata" in clean_keys:
             output["metadata"] = _sanitize_dict_secrets(self.metadata)
+        if "verified_live_url" in clean_keys or "live_url" in clean_keys or "url" in clean_keys or "deployment_url" in clean_keys or "health" in clean_keys or "launch_verification" in clean_keys:
+            if self.verified_live_url:
+                output["verified_live_url"] = self.verified_live_url
 
         # Artifact categories mapping
         artifact_category_aliases = {
@@ -522,6 +525,26 @@ class ProjectContext(BaseModel):
                 if url:
                     return url
         return None
+
+    @property
+    def latest_health_report(self) -> Optional[Dict[str, Any]]:
+        """
+        Returns the latest health report summary dict if available.
+        """
+        for art in self.artifacts.values():
+            if art.artifact_type == "health_report" and art.status == "AVAILABLE":
+                return art.content_summary or {}
+        return None
+
+    @property
+    def is_healthy(self) -> bool:
+        """
+        Returns True if latest verified health report reports HEALTHY status.
+        """
+        report = self.latest_health_report
+        if report and report.get("status") == "HEALTHY":
+            return True
+        return False
 
     # -------------------------------------------------------------------------
     # Serialization & Deserialization
